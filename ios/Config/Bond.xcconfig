@@ -1,0 +1,16 @@
+// Build settings shared by the app and the tunnel extension.
+//
+// To run on a device, create Config/Local.xcconfig (it is not checked in) with
+// your Apple developer team, and the prefix of identifiers your team owns:
+//
+//     DEVELOPMENT_TEAM = ABCDE12345
+//     BOND_ID_PREFIX = com.example
+//
+// The app is then <prefix>.bond, its extension <prefix>.bond.tunnel, and
+// their shared App Group group.<prefix>.bond.
+
+CODE_SIGN_STYLE = Automatic
+DEVELOPMENT_TEAM =
+BOND_ID_PREFIX = com.cartertech
+
+#include? "Local.xcconfig"

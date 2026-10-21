@@ -1,0 +1,63 @@
+# Push a tag like v0.2.0 to publish a release: an archive for every platform
+# on the GitHub release, and the Homebrew formula in the tap, so that
+#
+#   brew install cartercole/tap/bond
+#
+# installs it. Homebrew downloads the archives without credentials, so the
+# release has to be on a public repository.
+#
+# Needs a repository secret HOMEBREW_TAP_DEPLOY_KEY: the private half of an
+# SSH deploy key with write access to CarterCole/homebrew-tap, and nothing
+# else.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Test
+        run: go vet ./... && go test -short ./...
+
+      - name: Build
+        run: make release VERSION="$GITHUB_REF_NAME"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes \
+            dist/release/*.tar.gz dist/release/checksums.txt
+
+      - name: Update the Homebrew tap
+        env:
+          DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          TAP: CarterCole/homebrew-tap
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/tap_key
+          chmod 600 ~/.ssh/tap_key
+          gh api meta --jq '.ssh_keys[]' | sed 's/^/github.com /' >> ~/.ssh/known_hosts
+          export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/tap_key -o IdentitiesOnly=yes"
+          git clone --depth 1 "git@github.com:$TAP.git" tap
+          mkdir -p tap/Formula
+          cp dist/release/bond.rb tap/Formula/bond.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/bond.rb
+          git commit -m "bond ${GITHUB_REF_NAME#v}"
+          git push

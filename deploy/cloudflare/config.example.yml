@@ -1,0 +1,11 @@
+# /etc/cloudflared/config.yml on the aggregator.
+tunnel: <tunnel id from `cloudflared tunnel create bond`>
+credentials-file: /root/.cloudflared/<tunnel id>.json
+
+ingress:
+  # Only the WebSocket fallback is published. Joins and bonded UDP traffic go
+  # to the aggregator's own address, not through Cloudflare.
+  - hostname: bond.example.com
+    path: ^/v1/ws$
+    service: http://localhost:7777
+  - service: http_status:404

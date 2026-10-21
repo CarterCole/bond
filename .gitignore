@@ -1,0 +1,45 @@
+# Go
+/bin/
+/dist/
+*.test
+*.out
+coverage.*
+
+# Mobile build outputs (regenerate with `make mobile-android` / `make mobile-ios`)
+/core/mobile/build/
+/android/app/libs/*.aar
+/android/app/libs/*-sources.jar
+/ios/Frameworks/*.xcframework
+
+# Android
+/android/.gradle/
+/android/build/
+/android/app/build/
+/android/local.properties
+/android/.idea/
+/android/*.iml
+/android/captures/
+
+# iOS (project file is generated from ios/project.yml with xcodegen)
+/ios/*.xcodeproj
+/ios/*.xcworkspace
+/ios/DerivedData/
+/ios/.build/
+xcuserdata/
+
+# Deploy
+/deploy/*/.terraform/
+/deploy/*/*.tfstate*
+/deploy/*/.terraform.lock.hcl
+/deploy/cloudflare/*.json
+
+# Local state
+/var/
+*.pem
+*.key
+!deploy/**/*.example*
+
+# OS / editors
+.DS_Store
+.vscode/
+*.swp

@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bond</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #fff; --ink: #14181f; --muted: #667085; --line: #e4e7ec;
+    --up: #12a150; --down: #d92d20; --warn: #dc6803; --accent: #2e6be6; --bar: #dbe6fb;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0e1116; --card: #171b22; --ink: #e6e9ef; --muted: #8b95a7; --line: #262c36;
+            --up: #3ccb7f; --down: #f97066; --warn: #fdb022; --accent: #6ea0ff; --bar: #1f2f4d; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 980px; margin: 0 auto; padding: 20px 16px 48px; }
+  header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+  h1 { font-size: 22px; margin: 0; letter-spacing: -0.01em; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 28px 0 10px; font-weight: 600; }
+  .sub { color: var(--muted); }
+  .pill { font-size: 12px; font-weight: 600; padding: 2px 10px; border-radius: 999px; border: 1px solid currentColor; }
+  .ok { color: var(--up); } .bad { color: var(--down); } .warn { color: var(--warn); }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+  .tile, .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; }
+  .tile { padding: 12px 14px; }
+  .tile b { display: block; font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .tile span { color: var(--muted); font-size: 12px; }
+  .card { padding: 14px 16px; margin-bottom: 10px; }
+  .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .grow { flex: 1; min-width: 0; }
+  .name { font-weight: 600; overflow-wrap: anywhere; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--down); flex: none; }
+  .dot.up { background: var(--up); }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(92px, 1fr)); gap: 6px 14px; margin-top: 10px; font-variant-numeric: tabular-nums; }
+  .stats div { font-size: 13px; } .stats small { display: block; color: var(--muted); font-size: 11px; }
+  .bar { height: 6px; background: var(--bar); border-radius: 3px; margin-top: 10px; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--accent); border-radius: 3px; transition: width .4s; }
+  select, input, button { font: inherit; color: inherit; background: var(--card); border: 1px solid var(--line); border-radius: 7px; padding: 5px 9px; }
+  button { cursor: pointer; } button:hover { border-color: var(--accent); }
+  code, .mono { font-family: var(--mono); font-size: 13px; overflow-wrap: anywhere; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0; }
+  .chip { background: var(--bar); border-radius: 999px; padding: 2px 4px 2px 10px; font-size: 13px; display: inline-flex; align-items: center; gap: 4px; }
+  .chip button { border: 0; background: none; padding: 0 6px; color: var(--muted); }
+  .qr { width: 200px; max-width: 100%; border-radius: 8px; background: #fff; }
+  .err { color: var(--down); margin-top: 8px; min-height: 1.2em; }
+  label.check { display: inline-flex; gap: 8px; align-items: center; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1 id="title">Bond</h1>
+    <span id="state" class="pill warn">connecting</span>
+    <span id="sub" class="sub"></span>
+  </header>
+  <div id="app"></div>
+  <div id="err" class="err"></div>
+</main>
+<script>
+"use strict";
+// Every string that came from another device (names, addresses) is placed
+// with textContent, never as markup.
+function h(tag, attrs, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === "class") e.className = v;
+    else if (k.startsWith("on")) { e[k] = v; (e._ev = e._ev || []).push(k); } // a property, so morph() can carry it over
+    else if (v !== false && v != null) e.setAttribute(k, v === true ? "" : v);
+  }
+  for (const kid of kids.flat()) if (kid != null) e.append(kid.nodeType ? kid : document.createTextNode(kid));
+  return e;
+}
+const rate = b => b >= 1e9 ? (b / 1e9).toFixed(2) + " Gbit/s" : b >= 1e6 ? (b / 1e6).toFixed(1) + " Mbit/s" : b >= 1e3 ? (b / 1e3).toFixed(0) + " kbit/s" : Math.round(b) + " bit/s";
+const bytes = b => b >= 1e9 ? (b / 1e9).toFixed(2) + " GB" : b >= 1e6 ? (b / 1e6).toFixed(1) + " MB" : b >= 1e3 ? (b / 1e3).toFixed(0) + " kB" : b + " B";
+const dur = s => s >= 86400 ? Math.floor(s / 86400) + "d " + Math.floor(s % 86400 / 3600) + "h" : s >= 3600 ? Math.floor(s / 3600) + "h " + Math.floor(s % 3600 / 60) + "m" : s >= 60 ? Math.floor(s / 60) + "m" : s + "s";
+const tile = (v, label) => h("div", { class: "tile" }, h("b", {}, v), h("span", {}, label));
+const stat = (v, label) => h("div", {}, v, h("small", {}, label));
+const $ = id => document.getElementById(id);
+
+// morph updates the live tree to look like a freshly rendered one, in place.
+// Elements keep their identity from one refresh to the next, so nothing
+// flickers, an open menu stays open, and half-typed text stays typed.
+function morph(from, to) {
+  if (from.nodeType !== to.nodeType || from.nodeName !== to.nodeName) { from.replaceWith(to); return; }
+  if (from.nodeType === Node.TEXT_NODE) { if (from.data !== to.data) from.data = to.data; return; }
+  for (const a of [...from.attributes]) if (!to.hasAttribute(a.name)) from.removeAttribute(a.name);
+  for (const a of [...to.attributes]) if (from.getAttribute(a.name) !== a.value) from.setAttribute(a.name, a.value);
+  // Handlers close over the status they were rendered from: take the new ones.
+  for (const k of new Set([...(from._ev || []), ...(to._ev || [])])) from[k] = to[k] || null;
+  from._ev = to._ev;
+  if (from === document.activeElement) return; // whatever the user is in the middle of is theirs
+  if (from.nodeName === "INPUT") { if (from.type === "checkbox") from.checked = to.checked; return; }
+  const a = [...from.childNodes], b = [...to.childNodes];
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    if (i >= b.length) a[i].remove();
+    else if (i >= a.length) from.append(b[i]);
+    else morph(a[i], b[i]);
+  }
+  if (from.nodeName === "SELECT") from.value = to.value;
+}
+
+async function post(path, body) {
+  $("err").textContent = "";
+  const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { $("err").textContent = j.error || ("request failed: " + r.status); return null; }
+  if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+  refresh();
+  return j;
+}
+
+function pathCard(p, max, canEdit) {
+  const policies = ["primary", "bonded", "backup", "off"];
+  const sel = canEdit
+    ? h("select", { title: "How this path may be used", onchange: e => post("/api/path", { name: p.name, policy: e.target.value }) },
+        policies.map(x => h("option", { value: x, selected: x === p.policy }, x)))
+    : h("span", { class: "sub" }, p.policy);
+  return h("div", { class: "card" },
+    h("div", { class: "row" },
+      h("span", { class: "dot" + (p.up ? " up" : ""), title: p.up ? "up" : "down" }),
+      h("div", { class: "grow" }, h("span", { class: "name" }, p.name), " ", h("span", { class: "sub" }, p.kind || "")),
+      sel),
+    h("div", { class: "stats" },
+      stat(rate(p.tx_bps), "sending"), stat(rate(p.rx_bps), "receiving"),
+      stat(p.up ? p.rtt_ms.toFixed(0) + " ms" : "–", "round trip"), stat((p.loss * 100).toFixed(1) + " %", "loss"),
+      stat(p.capacity_bps ? rate(p.capacity_bps) : "not measured", "est. send capacity"),
+      stat(bytes(p.tx_bytes + p.rx_bytes), "carried")),
+    h("div", { class: "bar" }, h("i", { style: "width:" + Math.min(100, 100 * (p.tx_bps + p.rx_bps) / max).toFixed(1) + "%" })));
+}
+
+function prioritySection(s) {
+  const pr = s.priority || {};
+  const devices = pr.devices || [], ports = pr.ports || [];
+  const save = next => post("/api/priority", Object.assign({ all: !!pr.all, devices, ports, dscp: pr.dscp || [] }, next));
+  const adder = (placeholder, list, key) => {
+    // The button's handler is re-rendered every refresh but the input is the
+    // live one, so look the input up from the button rather than closing over it.
+    const add = el => { const v = el.value.trim(); if (v) { el.value = ""; save({ [key]: list.concat(v) }); } };
+    const input = h("input", { placeholder, size: 18, onkeydown: e => { if (e.key === "Enter") add(e.target); } });
+    return h("span", { class: "row" }, input, h("button", { onclick: e => add(e.target.previousElementSibling) }, "Add"));
+  };
+  const chips = (list, key) => h("div", { class: "chips" }, list.map((v, i) =>
+    h("span", { class: "chip" }, v, h("button", { title: "remove", onclick: () => save({ [key]: list.filter((_, j) => j !== i) }) }, "×"))));
+  return h("div", { class: "card" },
+    h("label", { class: "check" },
+      h("input", { type: "checkbox", checked: !!pr.all, onchange: e => save({ all: e.target.checked }) }),
+      "Everything this device sends is priority"),
+    h("p", { class: "sub" }, "Priority traffic is sent on the two best paths at once and never waits behind other traffic. ",
+      s.gateway ? "Devices can be LAN IP or MAC addresses." : "Devices are IP addresses."),
+    chips(devices, "devices"), adder(s.gateway ? "192.168.8.50 or aa:bb:…" : "192.168.8.50", devices, "devices"),
+    chips(ports, "ports"), adder("1935 or udp/9000-9010", ports, "ports"),
+    h("p", { class: "sub" }, s.realtime_packets.toLocaleString() + " priority packets so far"));
+}
+
+function renderHub(s) {
+  const paths = s.session.paths || [];
+  const up = paths.filter(p => p.up);
+  const tx = paths.reduce((a, p) => a + p.tx_bps, 0), rx = paths.reduce((a, p) => a + p.rx_bps, 0);
+  const max = Math.max(1e5, ...paths.map(p => p.tx_bps + p.rx_bps));
+  $("sub").textContent = s.name + " · " + s.address + " · via " + s.aggregator + " · " + s.mode + (s.gateway ? " · sharing with LAN" : "");
+  return [
+    h("div", { class: "tiles" },
+      tile(rate(tx), "upload"), tile(rate(rx), "download"),
+      tile(up.length + " / " + paths.length, "paths up"),
+      tile(s.session.reorder_hold_ms.toFixed(0) + " ms", "reorder window"),
+      tile(dur(s.uptime_sec), "uptime")),
+    s.socks5 ? h("p", { class: "sub" }, "No-root mode: send traffic through the SOCKS5 proxy at ", h("code", {}, s.socks5)) : null,
+    h("h2", {}, "Paths"),
+    paths.length ? paths.map(p => pathCard(p, max, true)) : h("div", { class: "card sub" }, "No uplinks found yet."),
+    h("h2", {}, "Priority"), prioritySection(s),
+  ];
+}
+
+function renderServer(s) {
+  const nodes = s.nodes || [];
+  $("sub").textContent = "mesh " + s.network + " · " + s.mode + " mode · " + (s.public || []).join(", ");
+  return [
+    h("div", { class: "tiles" },
+      tile(nodes.filter(n => n.online).length + " / " + nodes.length, "devices online"),
+      tile(dur(s.uptime_sec), "uptime")),
+    s.port_map ? h("p", { class: "sub" }, "Router: " + s.port_map.note) : null,
+    h("h2", {}, "Add a device"),
+    h("div", { class: "card row" },
+      h("img", { class: "qr", src: "/api/qr.svg", alt: "join code as a QR code" }),
+      h("div", { class: "grow" },
+        h("p", {}, "Scan with the Bond app, or run on the device:"),
+        h("p", {}, h("code", {}, "bondd hub --join " + s.join_code)),
+        h("p", { class: "sub" }, "Anyone with this code can join the mesh. Treat it like a password."))),
+    h("h2", {}, "Devices"),
+    nodes.length ? nodes.map(n => {
+      const paths = (n.session && n.session.paths) || [];
+      const max = Math.max(1e5, ...paths.map(p => p.tx_bps + p.rx_bps));
+      return h("div", {},
+        h("div", { class: "card row" },
+          h("span", { class: "dot" + (n.online ? " up" : "") }),
+          h("div", { class: "grow" }, h("span", { class: "name" }, n.name), " ",
+            h("span", { class: "sub" }, n.kind + (n.platform ? " · " + n.platform : "") + " · " + n.ip)),
+          h("button", { onclick: () => { if (confirm("Remove " + n.name + " from the mesh?")) post("/api/kick", { id: n.id }); } }, "Remove")),
+        paths.map(p => pathCard(p, max, false)));
+    }) : h("div", { class: "card sub" }, "Nothing has joined yet."),
+  ];
+}
+
+function renderRelay(s) {
+  const r = s.relay;
+  $("sub").textContent = s.name + " · sharing " + (s.uplink || "default uplink") + " · port " + r.port;
+  return [h("div", { class: "tiles" },
+    tile(String(r.clients), "hub paths through this relay"), tile(bytes(r.up_bytes), "forwarded up"),
+    tile(bytes(r.down_bytes), "forwarded down"), tile(dur(s.uptime_sec), "uptime"))];
+}
+
+async function refresh() {
+  try {
+    const s = await (await fetch("/api/status", { cache: "no-store" })).json();
+    const state = $("state");
+    const ok = s.role === "hub" ? s.connected : true;
+    state.textContent = s.role === "hub" ? (s.connected ? "connected" : "not connected") : s.role;
+    state.className = "pill " + (ok ? "ok" : "bad");
+    $("title").textContent = "Bond " + s.role;
+    document.title = "Bond · " + (s.name || s.role);
+    const view = s.role === "hub" ? renderHub(s) : s.role === "aggregator" ? renderServer(s) : renderRelay(s);
+    morph($("app"), h("div", { id: "app" }, view.flat().filter(Boolean)));
+  } catch (e) {
+    $("state").textContent = "daemon not reachable";
+    $("state").className = "pill bad";
+  }
+}
+refresh();
+setInterval(refresh, 1000);
+</script>
+</body>
+</html>

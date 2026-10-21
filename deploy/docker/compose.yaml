@@ -1,0 +1,19 @@
+# docker compose -f deploy/docker/compose.yaml up -d
+# docker compose -f deploy/docker/compose.yaml exec bond bond code
+services:
+  bond:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    restart: unless-stopped
+    environment:
+      # The address devices will connect to: this host's public name or IP.
+      BOND_PUBLIC: ${BOND_PUBLIC:?set BOND_PUBLIC to this host's public address}
+    ports:
+      - "7777:7777/udp"
+      - "7777:7777/tcp"
+    volumes:
+      - bond-state:/data
+
+volumes:
+  bond-state:

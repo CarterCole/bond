@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+    <string name="app_name" translatable="false">Bond</string>
+    <string name="channel_status">Status</string>
+    <string name="cancel">Cancel</string>
+
+    <!-- Join -->
+    <string name="join_intro">Join a mesh to use Wi-Fi and mobile data as one connection, or to lend this phone\'s mobile data to a hub.</string>
+    <string name="join_device_name">Device name</string>
+    <string name="join_code">Join code</string>
+    <string name="join_code_placeholder" translatable="false">bond://…</string>
+    <string name="join_code_help">The aggregator shows it: run <xliff:g example="bond code">bond code</xliff:g> there, or open its dashboard.</string>
+    <string name="join_scan">Scan QR code</string>
+    <string name="join_action">Join</string>
+    <string name="scan_failed">Could not scan (<xliff:g id="reason">%1$s</xliff:g>). Paste the join code instead.</string>
+
+    <!-- Modes -->
+    <string name="mode_bond">Bond this phone</string>
+    <string name="mode_bond_description">Use Wi-Fi and mobile data together, as one connection.</string>
+    <string name="mode_share">Share my connection</string>
+    <string name="mode_share_description">Lend this phone\'s mobile data to hubs on the same Wi-Fi.</string>
+    <string name="tile_share">Share connection</string>
+    <string name="action_disconnect">Disconnect</string>
+    <string name="action_stop">Stop</string>
+    <string name="error_not_joined">This phone has not joined a mesh.</string>
+    <string name="error_cannot_start">Android would not let it start. Try again with the app open.</string>
+
+    <!-- Bond this phone -->
+    <string name="vpn_connecting">Connecting…</string>
+    <string name="vpn_connected">Connected as <xliff:g id="address" example="10.207.0.5">%1$s</xliff:g> for <xliff:g id="duration" example="5m">%2$s</xliff:g></string>
+    <plurals name="vpn_connected_paths">
+        <item quantity="one">Connected over %d link</item>
+        <item quantity="other">Connected over %d links</item>
+    </plurals>
+    <string name="vpn_no_networks">Waiting for Wi-Fi or mobile data.</string>
+    <string name="vpn_denied">Bonding needs permission to set up a VPN.</string>
+    <string name="error_tunnel_closed">The tunnel closed unexpectedly. Switch it on again.</string>
+    <string name="error_vpn_permission">Android did not allow the VPN. Switch it on from the app to be asked again.</string>
+    <string name="priority_title">Priority device</string>
+    <string name="priority_description">Treat everything this phone sends as real-time traffic.</string>
+
+    <string name="path_wifi">Wi-Fi</string>
+    <string name="path_cellular">Mobile data</string>
+    <string name="path_fallback"><xliff:g id="path" example="Wi-Fi">%1$s</xliff:g> (WebSocket fallback)</string>
+    <string name="path_relay">Relay <xliff:g id="name" example="Pixel 9">%1$s</xliff:g></string>
+    <string name="path_quality"><xliff:g id="rtt" example="23">%1$d</xliff:g> ms · <xliff:g id="loss" example="0.4 %">%2$s</xliff:g> loss</string>
+    <string name="path_down">Down</string>
+    <string name="path_off">Off</string>
+    <string name="path_sending">↑ <xliff:g id="rate" example="1.2 Mbit/s">%1$s</xliff:g></string>
+    <string name="path_receiving">↓ <xliff:g id="rate" example="8.4 Mbit/s">%1$s</xliff:g></string>
+    <string name="policy_primary">Primary</string>
+    <string name="policy_bonded">Bonded</string>
+    <string name="policy_backup">Backup</string>
+    <string name="policy_off">Off</string>
+
+    <!-- Share my connection -->
+    <string name="share_starting">Starting…</string>
+    <string name="share_waiting">Waiting for mobile data</string>
+    <string name="share_retrying">Could not start; trying again</string>
+    <plurals name="share_hubs">
+        <item quantity="one">%d hub connected</item>
+        <item quantity="other">%d hubs connected</item>
+    </plurals>
+    <string name="share_summary"><xliff:g id="hubs" example="1 hub connected">%1$s</xliff:g> · <xliff:g id="size" example="12 MB">%2$s</xliff:g> forwarded</string>
+    <string name="share_sent">Sent for hubs</string>
+    <string name="share_returned">Returned to hubs</string>
+    <string name="share_refused">Datagrams refused</string>
+    <string name="share_upstream">Forwarding to</string>
+    <string name="share_announcing">Announcing this phone on the local network…</string>
+    <string name="share_announced">Hubs on this Wi-Fi find this phone by themselves.</string>
+    <string name="share_not_announced">Could not announce this phone on the local network. Add it on the hub by address.</string>
+    <string name="share_address">On a hub: bond relay add <xliff:g id="address" example="192.168.1.23:7778">%1$s</xliff:g></string>
+    <string name="local_network_denied">Without access to nearby devices, hubs on this Wi-Fi cannot reach the phone. Allow it in Settings › Apps › Bond › Permissions.</string>
+    <string name="battery_title">Keep sharing in the background?</string>
+    <string name="battery_text">Android puts idle apps to sleep, which would cut hubs off after a while. Let Bond run without battery restrictions so that sharing stays on with the screen off.</string>
+    <string name="battery_allow">Allow</string>
+    <string name="battery_skip">Not now</string>
+
+    <!-- Mesh -->
+    <string name="mesh_title">This mesh</string>
+    <string name="mesh_device">Device</string>
+    <string name="mesh_address">Address</string>
+    <string name="mesh_aggregator">Aggregator</string>
+    <string name="mesh_id">Mesh</string>
+    <string name="mesh_core">Core</string>
+    <string name="leave_action">Leave mesh</string>
+    <string name="leave_title">Leave this mesh?</string>
+    <string name="leave_text">Bonding and sharing stop and this phone forgets its keys. Joining again needs a join code.</string>
+    <string name="leave_confirm">Leave</string>
+</resources>
