@@ -30,7 +30,6 @@ cat <<EOF
 class Bond < Formula
   desc "Combine several internet connections into one for live streaming"
   homepage "https://github.com/$repo"
-  version "$version"
   license "AGPL-3.0-only"
 
   on_macos do

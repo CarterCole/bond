@@ -251,7 +251,7 @@ Measured, not estimated:
 | iOS app in the simulator: join against a live aggregator; its relay advertisement found by a desktop hub | works (the tunnel itself cannot run in a simulator) |
 | Aggregator restarted under a running hub | traffic resumes in about 1 s |
 | `deploy/push.sh` to an Ubuntu 24.04 server on a home LAN, then again to upgrade | installs the service, runs in kernel mode, prints the join code; the second run restarts it on the new binary |
-| `make release`, then `brew install` from a local tap pointing at the archives (macOS, Apple Silicon) | installs `bondd` and `bond`; `brew test` starts an aggregator and gets its join code; `brew audit --strict` passes but for the homepage, which is not public yet |
+| Tagging v0.1.0: the release workflow, then `brew install cartercole/tap/bond` on macOS (Apple Silicon) | tests pass on GitHub, archives published, tap updated; installs `bondd` and `bond`; `brew test` starts an aggregator and gets its join code; `brew audit --strict --online` passes |
 
 `make test` runs the suite (about a minute): unit tests, the engine against
 simulated impaired links, the whole stack in one process, and real nodes over
@@ -271,9 +271,9 @@ loopback sockets.
 - The AWS, Google Cloud and Azure Terraform (each passes `validate`; none has
   been applied), `push.sh` to a cloud VM, the Docker image and the Cloudflare
   Tunnel setup.
-- The release workflow and the published Homebrew tap: nothing has been
-  released yet. `bondd service install` and `restart` from a Homebrew install
-  need root, so only the path they write into the unit is tested.
+- The Homebrew formula on an Intel Mac or on Linux. `bondd service install`
+  and `restart` from a Homebrew install need root, so only the path they
+  write into the unit is tested.
 - UPnP port forwarding on a real router. It is tested against a simulated
   one; a real one (a Google OnHub) has only been asked who it is.
 
