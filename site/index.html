@@ -1,0 +1,822 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bond — bonded internet</title>
+<meta name="description" content="Bond combines several Internet connections into one: venue WiFi, a wired line, people's phones. When one dies the rest keep going without the connection dropping. Self-hosted, WireGuard inside, open source.">
+<link rel="canonical" href="https://bond.cartercole.net/">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="theme-color" content="#0f766e">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://bond.cartercole.net/">
+<meta property="og:title" content="Bond — bonded internet">
+<meta property="og:description" content="Every connection you can reach, bonded into one that keeps going when an uplink dies. Self-hosted, WireGuard inside, open source.">
+<meta property="og:image" content="https://bond.cartercole.net/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<style>
+  :root {
+    --bg: #f7f9f8; --surface: #ffffff; --sunk: #eef2f1; --ink: #0f1a19; --muted: #556664; --line: #dfe6e4; --line-strong: #c3cfcc;
+    --brand: #0f766e; --brand-ink: #0b5d57; --brand-soft: #d9f1ed; --cut: #c8372d;
+    --term-bg: #0d1514; --term-ink: #d5e3e0; --term-muted: #7f9592; --term-ok: #4ade80; --term-accent: #5eead4;
+    --p-wifi: #2563eb; --p-5g: #7c3aed; --p-lte: #c2410c; --p-wired: #0f766e;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --radius: 14px;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0a100f; --surface: #111a19; --sunk: #0d1514; --ink: #e4edeb; --muted: #8fa3a0; --line: #1f2c2a; --line-strong: #30423f;
+      --brand: #2dd4bf; --brand-ink: #5eead4; --brand-soft: #0f2f2b; --cut: #f87171;
+      --term-bg: #060b0a;
+      --p-wifi: #60a5fa; --p-5g: #a78bfa; --p-lte: #fb923c; --p-wired: #2dd4bf;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0a100f; --surface: #111a19; --sunk: #0d1514; --ink: #e4edeb; --muted: #8fa3a0; --line: #1f2c2a; --line-strong: #30423f;
+    --brand: #2dd4bf; --brand-ink: #5eead4; --brand-soft: #0f2f2b; --cut: #f87171;
+    --term-bg: #060b0a;
+    --p-wifi: #60a5fa; --p-5g: #a78bfa; --p-lte: #fb923c; --p-wired: #2dd4bf;
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; scroll-padding-top: 72px; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; overflow-x: hidden; }
+  a { color: var(--brand-ink); text-underline-offset: 3px; }
+  a:hover { color: var(--brand); }
+  code { font-family: var(--mono); font-size: .88em; background: var(--sunk); border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; overflow-wrap: anywhere; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 16px; }
+  @media (min-width: 720px) { .wrap { padding: 0 28px; } }
+
+  /* nav */
+  .nav { position: sticky; top: 0; z-index: 10; background: color-mix(in srgb, var(--bg) 86%, transparent); backdrop-filter: saturate(1.4) blur(12px); -webkit-backdrop-filter: saturate(1.4) blur(12px); border-bottom: 1px solid var(--line); }
+  .nav .wrap { display: flex; align-items: center; gap: 20px; height: 60px; }
+  .brand { display: inline-flex; align-items: center; gap: 10px; color: var(--ink); text-decoration: none; font-weight: 700; font-size: 18px; letter-spacing: -0.01em; }
+  .brand:hover { color: var(--ink); }
+  .mark { width: 30px; height: 30px; flex: none; }
+  .nav nav { margin-left: auto; display: flex; gap: 22px; align-items: center; }
+  .nav nav a { color: var(--muted); text-decoration: none; font-size: 15px; }
+  .nav nav a:hover { color: var(--ink); }
+  .nav nav .gh { color: var(--ink); display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--line-strong); border-radius: 999px; padding: 5px 12px; font-weight: 550; }
+  .nav nav .gh:hover { border-color: var(--brand); }
+  .gh svg { width: 16px; height: 16px; }
+  @media (max-width: 719px) { .nav nav a:not(.gh) { display: none; } }
+
+  /* hero */
+  .hero { padding: 64px 0 28px; }
+  @media (max-width: 719px) { .hero { padding: 40px 0 20px; } }
+  .eyebrow { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--brand-ink); background: var(--brand-soft); border-radius: 999px; padding: 4px 12px; margin-bottom: 20px; }
+  .eyebrow a { color: inherit; }
+  h1 { font-size: clamp(36px, 6.4vw, 64px); line-height: 1.04; letter-spacing: -0.035em; margin: 0 0 20px; max-width: 15ch; font-weight: 750; text-wrap: balance; }
+  h1 em { font-style: normal; color: var(--brand); }
+  .lede { font-size: clamp(17px, 2.1vw, 20px); color: var(--muted); max-width: 62ch; margin: 0 0 28px; text-wrap: pretty; }
+  .cta { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+  .install { display: flex; align-items: center; gap: 4px; background: var(--term-bg); color: var(--term-ink); border-radius: 12px; padding: 6px 6px 6px 16px; font: 15px/1 var(--mono); max-width: 100%; min-width: 0; }
+  .install .cmd { white-space: nowrap; overflow-x: auto; padding: 10px 0; scrollbar-width: none; }
+  .install .cmd::-webkit-scrollbar { display: none; }
+  .install .ps { color: var(--term-muted); user-select: none; margin-right: 10px; }
+  .copy { flex: none; font: 600 13px/1 system-ui, sans-serif; color: var(--term-ink); background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.12); border-radius: 8px; padding: 9px 12px; cursor: pointer; margin-left: 10px; }
+  .copy:hover { background: rgba(255,255,255,.14); }
+  .copy.done { color: var(--term-ok); }
+  .btn { display: inline-flex; align-items: center; gap: 8px; text-decoration: none; font-weight: 600; font-size: 15px; padding: 12px 18px; border-radius: 12px; border: 1px solid var(--line-strong); color: var(--ink); background: var(--surface); }
+  .btn:hover { border-color: var(--brand); color: var(--ink); }
+  .btn svg { width: 18px; height: 18px; }
+  .sub-cta { margin: 14px 0 0; font-size: 14px; color: var(--muted); }
+
+  /* simulation */
+  .sim { margin-top: 44px; background: var(--surface); border: 1px solid var(--line); border-radius: 18px; overflow: hidden; box-shadow: 0 1px 0 rgba(0,0,0,.02), 0 20px 50px -30px rgba(15,60,55,.25); }
+  .sim-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 14px 18px; border-bottom: 1px solid var(--line); font-size: 14px; }
+  .sim-head b { font-weight: 650; }
+  .sim-head .note { color: var(--muted); }
+  .live { display: inline-flex; align-items: center; gap: 7px; font-weight: 600; font-size: 13px; color: var(--brand-ink); }
+  .live i { width: 8px; height: 8px; border-radius: 50%; background: var(--brand); box-shadow: 0 0 0 0 var(--brand); animation: pulse 2s infinite; }
+  @keyframes pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--brand) 55%, transparent); } 70% { box-shadow: 0 0 0 8px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
+  .sim-head .count { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+  @media (max-width: 639px) { .sim-head .note { display: none; } .sim-head .count { margin-left: 0; width: 100%; font-size: 13px; } }
+  #diagram { display: block; width: 100%; height: auto; }
+  #diagram text { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; fill: var(--ink); }
+  #diagram .node rect { fill: var(--sunk); stroke: var(--line-strong); stroke-width: 1.2; }
+  #diagram .node .t { font-weight: 700; font-size: 16px; }
+  #diagram .node .s { fill: var(--muted); font-size: 11.5px; }
+  #diagram .wire { fill: none; stroke: var(--c); stroke-width: 2.4; stroke-linecap: round; transition: stroke-opacity .3s; }
+  #diagram .wire.cut { stroke: var(--line-strong) !important; stroke-dasharray: 5 7; stroke-opacity: 1; }
+  #diagram .hit { fill: none; stroke: transparent; stroke-width: 26; cursor: pointer; }
+  #diagram .plabel { font-size: 13px; font-weight: 600; fill: var(--c, var(--ink)); }
+  #diagram .plabel.cut { fill: var(--muted); }
+  #diagram .x { opacity: 0; transition: opacity .25s; pointer-events: none; }
+  #diagram .x.on { opacity: 1; }
+  #diagram .x circle { fill: var(--surface); stroke: var(--cut); stroke-width: 2; }
+  #diagram .x path { stroke: var(--cut); stroke-width: 2.4; stroke-linecap: round; }
+  #diagram .out { fill: none; stroke: var(--line-strong); stroke-width: 2.4; }
+  #diagram .globe { fill: none; stroke: var(--line-strong); stroke-width: 1.4; }
+  #diagram .pkt { transition: opacity .35s; }
+  #diagram .pkt.lost { opacity: 0; }
+  .legend { display: grid; grid-template-columns: repeat(4, 1fr); border-top: 1px solid var(--line); }
+  @media (max-width: 639px) { .legend { grid-template-columns: repeat(2, 1fr); } }
+  .legend button { all: unset; box-sizing: border-box; cursor: pointer; padding: 12px 18px; display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; align-items: center; border-right: 1px solid var(--line); font-size: 14px; }
+  .legend button:last-child { border-right: 0; }
+  @media (max-width: 639px) { .legend button:nth-child(2n) { border-right: 0; } .legend button:nth-child(-n+2) { border-bottom: 1px solid var(--line); } }
+  .legend button:hover { background: var(--sunk); }
+  .legend button:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; }
+  .legend .dot { width: 10px; height: 10px; border-radius: 50%; grid-row: span 2; }
+  .legend .nm { font-weight: 600; }
+  .legend .st { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+  .legend .st .c { color: var(--cut); font-weight: 600; }
+  .legend .bar { grid-column: 2; height: 4px; border-radius: 2px; background: var(--sunk); overflow: hidden; margin-top: 4px; }
+  .legend .bar i { display: block; height: 100%; width: 0; border-radius: 2px; transition: width .4s; }
+  .sim-foot { padding: 10px 18px 14px; color: var(--muted); font-size: 13px; border-top: 1px solid var(--line); }
+
+  /* sections */
+  section { padding: 76px 0 8px; }
+  @media (max-width: 719px) { section { padding: 56px 0 4px; } }
+  .kicker { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--brand-ink); font-weight: 700; margin: 0 0 10px; }
+  h2 { font-size: clamp(28px, 4vw, 40px); line-height: 1.12; letter-spacing: -0.025em; margin: 0 0 14px; max-width: 22ch; text-wrap: balance; }
+  h3 { font-size: 18px; margin: 0 0 6px; letter-spacing: -0.01em; }
+  .intro { color: var(--muted); font-size: 18px; max-width: 64ch; margin: 0 0 32px; text-wrap: pretty; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 22px; }
+  .card p { margin: 0; color: var(--muted); }
+  .card p + p { margin-top: 10px; }
+  .grid3 { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+  .grid2 { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+  @media (max-width: 400px) { .grid2 { grid-template-columns: 1fr; } }
+
+  .big { font-size: 34px; font-weight: 750; letter-spacing: -0.03em; line-height: 1.1; margin: 0 0 10px; font-variant-numeric: tabular-nums; color: var(--ink); }
+  .big small { font-size: 16px; font-weight: 600; color: var(--muted); letter-spacing: 0; }
+  .bars { margin: 4px 0 14px; display: grid; gap: 6px; font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .bars div { display: grid; grid-template-columns: 54px 1fr 40px; align-items: center; gap: 8px; }
+  .bars span.b { height: 10px; border-radius: 3px; background: var(--brand-soft); position: relative; overflow: hidden; }
+  .bars span.b i { position: absolute; inset: 0 auto 0 0; border-radius: 3px; }
+  .bars .sum { color: var(--ink); font-weight: 650; }
+
+  .role { display: flex; flex-direction: column; gap: 12px; }
+  .role .icon { width: 40px; height: 40px; border-radius: 10px; background: var(--brand-soft); color: var(--brand-ink); display: grid; place-items: center; }
+  .role .icon svg { width: 22px; height: 22px; }
+  .role p { flex: 1; }
+  .chipcmd { font: 13px/1.4 var(--mono); background: var(--sunk); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; overflow-x: auto; white-space: nowrap; color: var(--ink); }
+
+  .layers { margin-top: 14px; display: grid; grid-template-columns: 1fr; gap: 14px; }
+  @media (min-width: 860px) { .layers { grid-template-columns: 1.05fr 1fr; align-items: center; } }
+  .stack { display: grid; gap: 6px; }
+  .stack div { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; flex-wrap: wrap; border-radius: 10px; padding: 11px 14px; border: 1px solid var(--line); background: var(--surface); }
+  .stack div:nth-child(2) { margin: 0 10px; } .stack div:nth-child(3) { margin: 0 20px; } .stack div:nth-child(4) { margin: 0 30px; } .stack div:nth-child(5) { margin: 0 40px; }
+  @media (max-width: 480px) { .stack div:nth-child(n) { margin: 0; } }
+  .stack b { font-weight: 650; }
+  .stack span { color: var(--muted); font-size: 13.5px; }
+  .stack .hl { background: var(--brand-soft); border-color: color-mix(in srgb, var(--brand) 35%, transparent); }
+  .stack .hl b, .stack .hl span { color: var(--brand-ink); }
+
+  /* terminal */
+  .term { background: var(--term-bg); color: var(--term-ink); border-radius: 12px; padding: 14px 16px; font: 13.5px/1.6 var(--mono); overflow-x: auto; margin: 12px 0 0; white-space: pre; }
+  .term .ps { color: var(--term-muted); user-select: none; }
+  .term .dim { color: var(--term-muted); }
+  .term .ok { color: var(--term-ok); }
+  .term .ac { color: var(--term-accent); }
+  .steps { counter-reset: step; display: grid; gap: 14px; }
+  .step { display: grid; grid-template-columns: 44px 1fr; gap: 4px 16px; }
+  @media (max-width: 560px) { .step { grid-template-columns: 1fr; } }
+  .step::before { counter-increment: step; content: counter(step); width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; font-weight: 700; background: var(--brand); color: var(--surface); }
+  .step > div { min-width: 0; }
+  .step p { margin: 0; color: var(--muted); }
+  .step p + p { margin-top: 8px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 15px; }
+  th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: 12.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 650; }
+  tr:last-child td { border-bottom: 0; }
+  td:first-child { white-space: nowrap; }
+  .tablecard { padding: 4px 4px; overflow-x: auto; }
+  .tag { font: 600 13px/1 var(--mono); padding: 4px 8px; border-radius: 6px; background: var(--sunk); border: 1px solid var(--line); }
+  .result { font-weight: 650; color: var(--ink); }
+
+  .feat h3 { display: flex; align-items: center; gap: 10px; }
+  .feat h3 svg { width: 20px; height: 20px; color: var(--brand); flex: none; }
+
+  ul.checks { list-style: none; padding: 0; margin: 0; display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+  @media (max-width: 400px) { ul.checks { grid-template-columns: 1fr; } }
+  ul.checks li { display: grid; grid-template-columns: 22px 1fr; gap: 10px; color: var(--muted); }
+  ul.checks li b { color: var(--ink); font-weight: 600; }
+  ul.checks svg { width: 20px; height: 20px; color: var(--brand); margin-top: 2px; }
+  ul.plain { margin: 0; padding-left: 20px; color: var(--muted); display: grid; gap: 6px; }
+
+  .closing { margin: 88px 0 0; padding: 48px 0; border-top: 1px solid var(--line); }
+  .closing h2 { max-width: none; }
+  footer { padding: 28px 0 44px; border-top: 1px solid var(--line); color: var(--muted); font-size: 14px; }
+  footer .wrap { display: flex; flex-wrap: wrap; gap: 14px 28px; align-items: flex-start; justify-content: space-between; }
+  footer p { margin: 0 0 6px; max-width: 62ch; }
+  footer nav { display: flex; gap: 18px; flex-wrap: wrap; }
+  footer nav a { color: var(--muted); }
+
+  @media (prefers-reduced-motion: reduce) { .live i { animation: none; } * { transition: none !important; } }
+</style>
+</head>
+<body>
+
+<header class="nav">
+  <div class="wrap">
+    <a class="brand" href="#top" aria-label="Bond, home">
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="#0f766e"/><path d="M7 11.5c4.5 0 4.5 4.5 8.25 4.5H25M7 20.5c4.5 0 4.5-4.5 8.25-4.5" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      Bond
+    </a>
+    <nav aria-label="Sections">
+      <a href="#how">How it works</a>
+      <a href="#start">Quick start</a>
+      <a href="#tested">Tested</a>
+      <a class="gh" href="https://github.com/CarterCole/bond">
+        <svg viewBox="0 0 16 16" aria-hidden="true" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        GitHub
+      </a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+  <div class="wrap hero">
+    <span class="eyebrow">Open source · <a href="https://github.com/CarterCole/bond/releases">v0.1.0</a></span>
+    <h1>Every connection you can reach, <em>bonded into one.</em></h1>
+    <p class="lede">A venue's flaky WiFi, a wired line, three people's phones: Bond sends every packet down whichever uplink gets it there first, and when one of them dies the rest keep going without the connection dropping. Built for the live stream that has to hold. Self-hosted end to end.</p>
+    <div class="cta">
+      <div class="install">
+        <span class="cmd"><span class="ps">$</span><span id="cmd">brew install cartercole/tap/bond</span></span>
+        <button class="copy" type="button" data-copy="brew install cartercole/tap/bond">Copy</button>
+      </div>
+      <a class="btn" href="https://github.com/CarterCole/bond">
+        <svg viewBox="0 0 16 16" aria-hidden="true" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        Source on GitHub
+      </a>
+    </div>
+    <p class="sub-cta">macOS, or Linux with Homebrew. Archives for Linux on x86, ARM64 and 32-bit ARM (a Raspberry Pi) are on the <a href="https://github.com/CarterCole/bond/releases">releases page</a>.</p>
+
+    <figure class="sim" aria-labelledby="sim-cap" style="margin-left:0;margin-right:0">
+      <div class="sim-head">
+        <span class="live" id="live"><i></i>Live</span>
+        <b>Four uplinks, one connection</b>
+        <span class="note" id="sim-hint">— click a path to cut it</span>
+        <span class="count" id="count"></span>
+      </div>
+      <svg id="diagram" role="img" aria-label="A hub sends packets over four uplinks — venue WiFi, two phones and ethernet — to an aggregator, which puts them back in order and sends one stream to the Internet."></svg>
+      <div class="legend" id="legend"></div>
+      <figcaption class="sim-foot" id="sim-cap">A simulation of Bond's scheduler. Each packet goes to the path where it will arrive soonest; the aggregator puts them back in order and gives up on the ones a cut path took with it.</figcaption>
+    </figure>
+  </div>
+
+  <section id="why">
+    <div class="wrap">
+      <p class="kicker">Why Bond</p>
+      <h2>For the connection that has to hold.</h2>
+      <p class="intro">Every uplink carries part of the traffic. There are no speeds to enter and nothing to tune: Bond measures each path's round trip, loss and delivery, and places every packet where it will arrive first.</p>
+      <div class="grid3">
+        <div class="card">
+          <p class="big">7.83 <small>Mbit/s bonded</small></p>
+          <div class="bars" aria-hidden="true">
+            <div><span>link A</span><span class="b"><i style="width:66%;background:var(--p-wifi)"></i></span><span>5.20</span></div>
+            <div><span>link B</span><span class="b"><i style="width:33%;background:var(--p-5g)"></i></span><span>2.62</span></div>
+            <div class="sum"><span>bonded</span><span class="b"><i style="width:66%;background:var(--p-wifi)"></i><i style="left:66%;width:33%;background:var(--p-5g)"></i></span><span>7.83</span></div>
+          </div>
+          <h3>Faster together</h3>
+          <p>Two interfaces shaped to 6 and 3 Mbit/s managed 5.20 and 2.62 on their own. Bonded, an upload to the Internet ran at 7.83.</p>
+        </div>
+        <div class="card">
+          <p class="big">~10 <small>ms to rejoin</small></p>
+          <h3>Holds when an uplink dies</h3>
+          <p>Cut the faster of two links three seconds into an upload and the upload still completes. An uplink that drops and comes back is carrying traffic again in about 10 ms; an aggregator restarted under a running hub, in about a second.</p>
+        </div>
+        <div class="card">
+          <p class="big">Any IP <small>traffic</small></p>
+          <h3>Nothing to change in your apps</h3>
+          <p>The splitting happens below the WireGuard tunnel, so everything that runs over IP works: TCP, UDP, ICMP, SRT, RTMP, WebRTC, games, other VPNs.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="how">
+    <div class="wrap">
+      <p class="kicker">How it works</p>
+      <h2>Three roles, one binary.</h2>
+      <p class="intro"><code>bondd</code> runs as whichever part you need. A join code ties them into a mesh; it is a secret that never crosses the network, and it keys the encryption of the join itself.</p>
+      <div class="grid3">
+        <div class="card role">
+          <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="7" rx="1.5"/><rect x="3" y="13" width="18" height="7" rx="1.5"/><path d="M7 7.5h.01M7 16.5h.01"/></svg></div>
+          <h3>Aggregator</h3>
+          <p>Any machine with a public address: a VPS, a cloud VM, or a server at home, where it asks the router to forward its port with UPnP. Your traffic rejoins the Internet here.</p>
+          <div class="chipcmd">sudo bondd server --public &lt;address&gt;</div>
+        </div>
+        <div class="card role">
+          <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="5" width="16" height="11" rx="1.5"/><path d="M2 19h20"/></svg></div>
+          <h3>Hub</h3>
+          <p>The machine you want better Internet on — a laptop, a Raspberry Pi, a router. It opens a path through every uplink it has and sends each packet down whichever gets it there soonest.</p>
+          <div class="chipcmd">sudo bondd hub --join 'bond://…'</div>
+        </div>
+        <div class="card role">
+          <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="7" y="2.5" width="10" height="19" rx="2"/><path d="M11 18.5h2"/></svg></div>
+          <h3>Relay</h3>
+          <p>Lends its uplink to hubs nearby. A phone in Share mode forwards a hub's already-encrypted packets over its cellular connection. Hubs find relays on the LAN by themselves.</p>
+          <div class="chipcmd">bondd relay --join 'bond://…'</div>
+        </div>
+      </div>
+
+      <div class="layers">
+        <div class="card">
+          <h3>Real WireGuard, with Bond underneath</h3>
+          <p>Inside is unmodified <code>wireguard-go</code>. Bond replaces only its transport: each encrypted datagram goes out on one or more paths, and what arrives is put back in order as if it came from a single peer. Paths come and go beneath a WireGuard session that never notices.</p>
+          <p>Relays and anything else along a path see ciphertext only. <a href="https://github.com/CarterCole/bond/blob/main/docs/PROTOCOL.md">How Bond works</a> covers the wire format, the scheduler and the known limits.</p>
+        </div>
+        <div class="stack" aria-label="Protocol layers">
+          <div><b>Your traffic</b><span>TCP, UDP, ICMP — anything IPv4</span></div>
+          <div><b>IP packet</b><span>from a TUN device or a userspace stack</span></div>
+          <div><b>WireGuard</b><span>encryption, peer authentication</span></div>
+          <div class="hl"><b>Bond datagram</b><span>28-byte header: session, path, order</span></div>
+          <div><b>UDP</b><span>or a WebSocket where UDP is blocked</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="start">
+    <div class="wrap">
+      <p class="kicker">Quick start</p>
+      <h2>Bonded in a few minutes.</h2>
+      <p class="intro">You need a server with UDP and TCP port 7777 open, and the machine you want to speed up.</p>
+      <div class="steps">
+        <div class="step card">
+          <div>
+            <h3>Start the aggregator</h3>
+            <p>From a clone of the repository, <code>push.sh</code> cross-compiles, installs a systemd service on the server and prints a join code and QR. Terraform for AWS, Google Cloud and Azure is in <code>deploy/</code>, and <code>deploy/docker/</code> runs it as an unprivileged container.</p>
+<div class="term"><span class="ps">$ </span>deploy/push.sh user@your-server</div>
+          </div>
+        </div>
+        <div class="step card">
+          <div>
+            <h3>Join a hub</h3>
+            <p>All of the machine's traffic now goes through the bond. Without root, add <code>--userspace</code>: nothing is captured, and applications use the SOCKS5 proxy it opens on <code>127.0.0.1:1080</code>.</p>
+<div class="term"><span class="ps">$ </span>sudo bondd hub --join 'bond://…the code…'</div>
+          </div>
+        </div>
+        <div class="step card">
+          <div>
+            <h3>Add uplinks — nothing to configure</h3>
+            <p>Turn on a phone's USB tethering or hotspot and it shows up as a path within a couple of seconds. Run a relay on anything on the same LAN with its own connection, or turn on <b>Share my connection</b> in the phone app.</p>
+<div class="term"><span class="ps">$ </span>bondd relay --join 'bond://…the code…'</div>
+          </div>
+        </div>
+        <div class="step card">
+          <div>
+            <h3>Watch it</h3>
+            <p>The same view, live, is a dashboard at <code>http://127.0.0.1:7780</code> on any machine running <code>bondd</code>. On the aggregator it shows the join QR and every device.</p>
+<div class="term"><span class="ps">$ </span>bond status
+<span class="ac">hub studio-mac</span>  10.207.0.2  connected to 203.0.113.5:7777  <span class="dim">(kernel mode)</span>
+up 8.8 Mbit/s   down 41.3 Mbit/s   reorder window 22 ms
+
+<span class="dim">PATH           KIND    POLICY   STATE  RTT    LOSS  SEND CAP    UP          DOWN</span>
+en0            direct  primary  <span class="ok">up</span>     18 ms  0.0%  6.5 Mbit/s  5.9 Mbit/s  28.1 Mbit/s
+en7            direct  bonded   <span class="ok">up</span>     54 ms  0.2%  3.5 Mbit/s  2.9 Mbit/s  11.0 Mbit/s
+relay:Pixel-9  relay   bonded   <span class="ok">up</span>     61 ms  0.4%  2.8 Mbit/s  0 bit/s     2.2 Mbit/s</div>
+          </div>
+        </div>
+        <div class="step card">
+          <div>
+            <h3>Keep it running</h3>
+            <p>Installs a systemd unit on Linux or a launchd daemon on macOS. With <code>--join</code> it joins on the spot, so the code never ends up in a unit file.</p>
+<div class="term"><span class="ps">$ </span>sudo bondd service install hub --join 'bond://…'</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="paths">
+    <div class="wrap">
+      <p class="kicker">Control</p>
+      <h2>Say how each path may be used. Bond does the rest.</h2>
+      <p class="intro">Set a policy with <code>bond path &lt;name&gt; &lt;policy&gt;</code> or from the dashboard; the choice is remembered. With little traffic Bond just uses the fastest path. As a path fills, its queue grows and traffic spills onto the next, so under load each path ends up carrying what it can.</p>
+      <div class="grid2">
+        <div class="card tablecard">
+          <table>
+            <thead><tr><th>Policy</th><th>Meaning</th></tr></thead>
+            <tbody>
+              <tr><td><span class="tag">primary</span></td><td>Preferred while healthy. The interface your machine was already using starts as this.</td></tr>
+              <tr><td><span class="tag">bonded</span></td><td>Used alongside whenever that gets a packet there sooner. Tethers and relays start as this.</td></tr>
+              <tr><td><span class="tag">backup</span></td><td>Idle until nothing else is healthy. For metered data you only want spent in an emergency.</td></tr>
+              <tr><td><span class="tag">off</span></td><td>Never used.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="card">
+          <h3>Priority traffic</h3>
+          <p>A device, a port or a protocol can be priority. Its packets go out on the <b>two best paths at once</b> and are never held back to be put in order, so a path stalling or dying costs them nothing. Other traffic makes room. Replies are prioritised too, without configuring the aggregator.</p>
+<div class="term"><span class="ps">$ </span>bond priority add 192.168.8.50   <span class="dim"># a device</span>
+<span class="ps">$ </span>bond priority add 1935           <span class="dim"># RTMP</span>
+<span class="ps">$ </span>bond priority add udp/9000-9010  <span class="dim"># SRT</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="more">
+    <div class="wrap">
+      <p class="kicker">Everything else</p>
+      <h2>Fits the setup you already have.</h2>
+      <div class="grid3">
+        <div class="card feat">
+          <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M12 5v14"/><circle cx="12" cy="12" r="9"/></svg>Share it with the LAN</h3>
+          <p><code>sudo bondd hub --gateway</code> turns the hub into a router. Point an encoder, cameras or a console at it and they are on the bond with no software of their own. On Linux, priority can be per device by address or MAC.</p>
+        </div>
+        <div class="card feat">
+          <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 18 0 9 9 0 0 0-18 0M3.6 9h16.8M3.6 15h16.8M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>Through networks that block UDP</h3>
+          <p>If an uplink's UDP path stays dead for eight seconds, the hub opens a WebSocket path over it instead, and drops it once UDP is back. Behind a Cloudflare Tunnel the fallback looks like ordinary HTTPS.</p>
+        </div>
+        <div class="card feat">
+          <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="7" y="2.5" width="10" height="19" rx="2"/><path d="M11 18.5h2"/></svg>Phone apps</h3>
+          <p>Android and iOS apps embed the same Go core: <b>Bond this phone</b> uses WiFi and cellular together, <b>Share my connection</b> makes the phone a relay. Build them from source; neither has run its tunnel on a real phone yet.</p>
+        </div>
+        <div class="card feat">
+          <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h10"/></svg>Stacks with Tailscale</h3>
+          <p>Run Tailscale on the hub as usual and your tailnet rides the bond, surviving an uplink dying. Or advertise the mesh's routes from a kernel-mode aggregator to reach every bonded device from your tailnet.</p>
+        </div>
+        <div class="card feat">
+          <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 18a4.5 4.5 0 0 1-.5-8.97A6 6 0 0 1 18 8.5a4 4 0 0 1-1 9.5H7z"/></svg>Runs anywhere Linux does</h3>
+          <p>Terraform for AWS, Google Cloud and Azure, a Docker image, or <code>push.sh</code> to any server. Big clouds bill traffic out at $0.08–0.12/GB; a 6 Mbit/s stream is about 2.7 GB an hour, so a VPS with a few TB included costs far less.</p>
+        </div>
+        <div class="card feat">
+          <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 4 6v6c0 4.5 3.4 8.3 8 9 4.6-.7 8-4.5 8-9V6l-8-3z"/></svg>Yours, end to end</h3>
+          <p>No account, no service in the middle. The aggregator is a machine you run, the code is AGPL-3.0, and IPv6 to the Internet is held off while bonded so it cannot quietly route around the tunnel.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="security">
+    <div class="wrap">
+      <p class="kicker">Security</p>
+      <h2>Built so a path can't be turned against you.</h2>
+      <ul class="checks">
+        <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg><span><b>WireGuard between hub and aggregator.</b> Relays and every network on the way see ciphertext only.</span></li>
+        <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg><span><b>Join codes are secrets that never travel.</b> Mint a single-use one with an expiry; remove a device with <code>bond kick</code>.</span></li>
+        <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg><span><b>Paths are authenticated per session.</b> Nobody else can redirect one, and a path counts as up only after a round trip replayed traffic cannot fake.</span></li>
+        <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg><span><b>Relays forward narrowly.</b> Only to their own mesh's aggregator, only for local addresses, only what looks like a hub's datagram.</span></li>
+        <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg><span><b>The aggregator guards its own host.</b> It refuses to forward to its loopback and link-local space, the cloud metadata service included.</span></li>
+        <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg><span><b>The status API stays local.</b> It listens on loopback and rejects requests a web page could forge.</span></li>
+      </ul>
+    </div>
+  </section>
+
+  <section id="tested">
+    <div class="wrap">
+      <p class="kicker">Tested</p>
+      <h2>Measured, not estimated.</h2>
+      <p class="intro">Every number on this page came from a run. What hasn't been run yet is listed too.</p>
+      <div class="grid2">
+        <div class="card tablecard">
+          <table>
+            <thead><tr><th>Test</th><th>Result</th></tr></thead>
+            <tbody>
+              <tr><td style="white-space:normal">Linux, two links shaped to 6 + 3 Mbit/s, upload</td><td><span class="result">7.83 Mbit/s</span> bonded, against 5.20 and 2.62 alone</td></tr>
+              <tr><td style="white-space:normal">Faster link cut 3 s into an upload</td><td><span class="result">Upload completes</span>; the link rejoins 2 s after it returns</td></tr>
+              <tr><td style="white-space:normal">Simulated 5 + 3 + 4 Mbit/s paths, 10–40 ms delays, TCP</td><td><span class="result">8.3 Mbit/s</span> bonded, against 4.5 on the best path, in order</td></tr>
+              <tr><td style="white-space:normal">25 % loss on both of two paths</td><td>Priority traffic <span class="result">92 %</span> delivered, ordinary 76 %</td></tr>
+              <tr><td style="white-space:normal">Whole container routed through the bond</td><td><span class="result">HTTPS, ping and raw UDP</span> all work</td></tr>
+              <tr><td style="white-space:normal">Android app as a relay for a desktop hub</td><td><span class="result">Works</span>; nothing leaks over WiFi while mobile data is off</td></tr>
+              <tr><td style="white-space:normal">Aggregator restarted under a running hub</td><td>Traffic resumes in <span class="result">about 1 s</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="card">
+          <h3>Not tested yet</h3>
+          <p style="margin-bottom:12px">It needs hardware or accounts this was not built with:</p>
+          <ul class="plain">
+            <li>Either phone app's tunnel on a real phone</li>
+            <li>A hub behind real carrier NAT, with real phones as relays</li>
+            <li>macOS kernel and gateway modes (the Linux equivalents are tested)</li>
+            <li>The cloud Terraform applied, the Docker image, the Cloudflare Tunnel setup</li>
+            <li>UPnP on a real router, rather than a simulated one</li>
+          </ul>
+          <p style="margin-top:14px">Not built yet: IPv6 inside the tunnel, port forwarding to bonded devices, several aggregators to choose between, Windows. The <a href="https://github.com/CarterCole/bond#what-has-been-tested">README</a> has the full list.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="wrap closing">
+    <h2>Make your connection hold.</h2>
+    <p class="intro" style="margin-bottom:24px">Install it on a Mac or Linux box, point it at a server you control, and plug in a phone.</p>
+    <div class="cta">
+      <div class="install">
+        <span class="cmd"><span class="ps">$</span>brew install cartercole/tap/bond</span>
+        <button class="copy" type="button" data-copy="brew install cartercole/tap/bond">Copy</button>
+      </div>
+      <a class="btn" href="https://github.com/CarterCole/bond/releases">Download a release</a>
+    </div>
+  </div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div>
+      <p>Bond is free software under the <a href="https://github.com/CarterCole/bond/blob/main/LICENSE">GNU AGPL, version 3 only</a>. © 2026 Carter Cole.</p>
+      <p>It includes wireguard-go (MIT). WireGuard is a registered trademark of Jason A. Donenfeld.</p>
+    </div>
+    <nav aria-label="Footer">
+      <a href="https://github.com/CarterCole/bond">GitHub</a>
+      <a href="https://github.com/CarterCole/bond/releases">Releases</a>
+      <a href="https://github.com/CarterCole/bond/blob/main/docs/PROTOCOL.md">Protocol</a>
+      <a href="https://github.com/CarterCole/bond/issues">Issues</a>
+    </nav>
+  </div>
+</footer>
+
+<script>
+"use strict";
+
+for (const b of document.querySelectorAll(".copy")) {
+  b.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(b.dataset.copy); b.textContent = "Copied"; b.classList.add("done"); }
+    catch { b.textContent = "Select it"; }
+    setTimeout(() => { b.textContent = "Copy"; b.classList.remove("done"); }, 1600);
+  });
+}
+
+// The diagram: a small model of Bond's scheduler. Every packet goes to the
+// up path where it would arrive soonest (its latency plus whatever is queued
+// on it); the aggregator delivers in sequence and skips what a cut path lost.
+(() => {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.getElementById("diagram");
+  const legend = document.getElementById("legend");
+  const count = document.getElementById("count");
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)");
+
+  const PATHS = [
+    { name: "Venue WiFi", short: "WiFi", color: "--p-wifi", lat: 950, gap: 175 },
+    { name: "Phone · 5G", short: "5G", color: "--p-5g", lat: 1150, gap: 145 },
+    { name: "Phone · LTE", short: "LTE", color: "--p-lte", lat: 1400, gap: 270 },
+    { name: "Ethernet", short: "Wired", color: "--p-wired", lat: 800, gap: 125 },
+  ];
+  const SPAWN = 62, OUT_SPEED = 0.17, OUT_GAP = 58; // outbound: units per ms, ms between packets
+
+  const el = (tag, attrs, parent) => {
+    const e = document.createElementNS(NS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    if (parent) parent.append(e);
+    return e;
+  };
+
+  let geo, wires = [], hits = [], labels = [], marks = [], outLine, layerPk;
+
+  function layout(portrait) {
+    if (!portrait) {
+      const W = 900, H = 330, cy = 165, hub = { x: 20, w: 150 }, agg = { x: 545, w: 140 };
+      const x0 = hub.x + hub.w, x1 = agg.x, ys = [42, 124, 206, 288];
+      return {
+        W, H,
+        nodes: [
+          { x: hub.x, y: cy - 32, w: hub.w, h: 64, t: "Hub", s: "laptop · Pi · router" },
+          { x: agg.x, y: cy - 32, w: agg.w, h: 64, t: "Aggregator", s: "any VPS" },
+        ],
+        paths: ys.map(y => `M${x0} ${cy} C${x0 + 70} ${cy} ${x0 + 70} ${y} ${x0 + 140} ${y} L${x1 - 140} ${y} C${x1 - 70} ${y} ${x1 - 70} ${cy} ${x1} ${cy}`),
+        labels: ys.map((y, i) => ({ x: (x0 + x1) / 2, y: y - 11, text: PATHS[i].name })),
+        marks: ys.map(y => ({ x: (x0 + x1) / 2, y })),
+        out: `M${agg.x + agg.w} ${cy} L${W - 62} ${cy}`,
+        globe: { x: W - 36, y: cy, r: 24, lx: W - 36, ly: cy + 46, anchor: "middle" },
+      };
+    }
+    const W = 360, H = 660, cx = 180, xs = [45, 135, 225, 315];
+    const y0 = 86, y1 = 430;
+    return {
+      W, H,
+      nodes: [
+        { x: cx - 80, y: 22, w: 160, h: 64, t: "Hub", s: "laptop · Pi · router" },
+        { x: cx - 75, y: y1, w: 150, h: 64, t: "Aggregator", s: "any VPS" },
+      ],
+      paths: xs.map(x => `M${cx} ${y0} C${cx} ${y0 + 60} ${x} ${y0 + 50} ${x} ${y0 + 115} L${x} ${y1 - 115} C${x} ${y1 - 50} ${cx} ${y1 - 60} ${cx} ${y1}`),
+      labels: xs.map((x, i) => ({ x, y: (y0 + y1) / 2 - 2, text: PATHS[i].short, pill: true })),
+      marks: xs.map(x => ({ x, y: (y0 + y1) / 2 + 30 })),
+      out: `M${cx} ${y1 + 64} L${cx} ${H - 66}`,
+      globe: { x: cx, y: H - 40, r: 24, lx: cx + 36, ly: H - 35, anchor: "start" },
+    };
+  }
+
+  function build() {
+    const portrait = svg.clientWidth < 600;
+    if (geo && geo.portrait === portrait) return;
+    geo = layout(portrait); geo.portrait = portrait;
+    svg.replaceChildren();
+    svg.setAttribute("viewBox", `0 0 ${geo.W} ${geo.H}`);
+    const root = getComputedStyle(document.documentElement);
+
+    wires = geo.paths.map((d, i) => {
+      const w = el("path", { d, class: "wire", style: `--c:var(${PATHS[i].color})`, "stroke-opacity": .38 }, svg);
+      w.len = w.getTotalLength();
+      return w;
+    });
+    outLine = el("path", { d: geo.out, class: "out" }, svg);
+    outLine.len = outLine.getTotalLength();
+
+    layerPk = el("g", {}, svg);
+
+    for (const n of geo.nodes) {
+      const g = el("g", { class: "node" }, svg);
+      el("rect", { x: n.x, y: n.y, width: n.w, height: n.h, rx: 12 }, g);
+      el("text", { x: n.x + n.w / 2, y: n.y + 28, "text-anchor": "middle", class: "t" }, g).textContent = n.t;
+      el("text", { x: n.x + n.w / 2, y: n.y + 47, "text-anchor": "middle", class: "s" }, g).textContent = n.s;
+    }
+    const gl = geo.globe, gg = el("g", {}, svg);
+    el("circle", { cx: gl.x, cy: gl.y, r: gl.r, class: "globe" }, gg);
+    el("ellipse", { cx: gl.x, cy: gl.y, rx: gl.r * .45, ry: gl.r, class: "globe" }, gg);
+    el("path", { d: `M${gl.x - gl.r} ${gl.y} H${gl.x + gl.r}`, class: "globe" }, gg);
+    el("text", { x: gl.lx, y: gl.ly, "text-anchor": gl.anchor, class: "plabel" }, gg).textContent = "Internet";
+
+    labels = geo.labels.map((l, i) => {
+      const g = el("g", {}, svg);
+      if (l.pill) el("rect", { x: l.x - 26, y: l.y - 14, width: 52, height: 22, rx: 11, style: "fill:var(--surface);stroke:var(--line)" }, g);
+      const t = el("text", { x: l.x, y: l.y + (l.pill ? 1.5 : 0), "text-anchor": "middle", "dominant-baseline": l.pill ? "middle" : "auto", class: "plabel", style: `--c:var(${PATHS[i].color})` }, g);
+      t.textContent = l.text;
+      return t;
+    });
+    marks = geo.marks.map(m => {
+      const g = el("g", { class: "x", transform: `translate(${m.x} ${m.y})` }, svg);
+      el("circle", { r: 11 }, g);
+      el("path", { d: "M-4 -4 L4 4 M4 -4 L-4 4" }, g);
+      return g;
+    });
+    hits = geo.paths.map((d, i) => {
+      const h = el("path", { d, class: "hit" }, svg);
+      h.addEventListener("click", () => { manual = true; toggle(i); });
+      el("title", {}, h).textContent = `${PATHS[i].name}: click to cut or restore`;
+      return h;
+    });
+
+    // Packets in flight are tied to the old geometry: start the stream afresh.
+    for (const p of packets.values()) p.el && p.el.remove();
+    packets.clear(); buffer.clear(); outQ = [];
+    nextOut = seq; lastOut = 0;
+    for (const P of PATHS) P.free = now;
+    paint();
+  }
+
+  // Legend
+  const rows = PATHS.map((P, i) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.innerHTML = `<span class="dot" style="background:var(${P.color})"></span><span class="nm"></span><span class="st"></span><span class="bar"><i style="background:var(${P.color})"></i></span>`;
+    b.querySelector(".nm").textContent = P.name;
+    b.addEventListener("click", () => { manual = true; toggle(i); });
+    legend.append(b);
+    return { b, st: b.querySelector(".st"), bar: b.querySelector(".bar i") };
+  });
+
+  for (const P of PATHS) { P.up = true; P.free = 0; }
+  let now = 0, seq = 0, nextOut = 0, lastOut = 0, spawnAt = 0, delivered = 0, outQ = [];
+  let manual = false, nextCut = 4200, cutIdx = 0, restoreAt = null, restoreIdx = -1;
+  const packets = new Map(), buffer = new Set(), recent = [];
+
+  function pick() {
+    let best = -1, bestT = Infinity;
+    PATHS.forEach((P, i) => {
+      if (!P.up) return;
+      const t = Math.max(now, P.free) + P.lat;
+      if (t < bestT) { bestT = t; best = i; }
+    });
+    return best;
+  }
+
+  function send(p) {
+    const i = pick();
+    if (i < 0) { p.state = "wait"; p.path = -1; return; }
+    const P = PATHS[i], start = Math.max(now, P.free);
+    P.free = start + P.gap;
+    Object.assign(p, { path: i, start, end: start + P.lat, state: "queued" });
+    recent.push({ t: now, i });
+  }
+
+  function toggle(i) {
+    const P = PATHS[i];
+    P.up = !P.up;
+    if (P.up) { P.free = now; }
+    else {
+      for (const p of packets.values()) {
+        if (p.path !== i) continue;
+        if (p.state === "fly") { p.state = "lost"; p.el.classList.add("lost"); const e = p.el; setTimeout(() => e.remove(), 400); p.el = null; }
+        else if (p.state === "queued") send(p); // not sent yet: it goes elsewhere
+      }
+    }
+    paint();
+  }
+
+  function paint() {
+    PATHS.forEach((P, i) => {
+      wires[i] && wires[i].classList.toggle("cut", !P.up);
+      labels[i] && labels[i].classList.toggle("cut", !P.up);
+      marks[i] && marks[i].classList.toggle("on", !P.up);
+      rows[i].b.setAttribute("aria-pressed", String(!P.up));
+      rows[i].b.title = P.up ? "Click to cut this path" : "Click to restore this path";
+    });
+    shares();
+  }
+
+  function shares() {
+    while (recent.length && recent[0].t < now - 3000) recent.shift();
+    const n = recent.length || 1;
+    PATHS.forEach((P, i) => {
+      const s = Math.round(100 * recent.filter(r => r.i === i).length / n);
+      rows[i].st.innerHTML = !P.up ? `<span class="c">cut</span>` : reduce.matches ? "up" : `up · carrying ${s}%`;
+      rows[i].bar.style.width = (P.up ? s : 0) + "%";
+    });
+    const up = PATHS.filter(P => P.up).length;
+    count.textContent = reduce.matches ? `${up} of 4 up` : `${up} of 4 up · ${delivered.toLocaleString()} delivered in order`;
+  }
+
+  function pkt(color, r) {
+    return el("circle", { r, style: `fill:var(${color})`, class: "pkt" }, layerPk);
+  }
+
+  function step(dt) {
+    now += dt;
+
+    if (!manual) {
+      if (restoreAt !== null && now >= restoreAt) { if (!PATHS[restoreIdx].up) toggle(restoreIdx); restoreAt = null; }
+      if (now >= nextCut) {
+        const i = [3, 1, 0, 2][cutIdx++ % 4];
+        if (PATHS[i].up) toggle(i);
+        restoreIdx = i; restoreAt = now + 3600; nextCut = now + 7600;
+      }
+    }
+
+    while (spawnAt <= now) {
+      spawnAt += SPAWN;
+      if (!PATHS.some(P => P.up)) continue; // nowhere to send: nothing is offered
+      const p = { seq: seq++ };
+      packets.set(p.seq, p);
+      send(p);
+    }
+    for (const p of packets.values()) if (p.state === "wait") send(p);
+
+    for (const p of packets.values()) {
+      if (p.state === "queued" && now >= p.start) {
+        p.state = "fly";
+        p.el = pkt(PATHS[p.path].color, 4.6);
+      }
+      if (p.state === "fly") {
+        const w = wires[p.path], f = Math.min(1, (now - p.start) / (p.end - p.start));
+        const pt = w.getPointAtLength(f * w.len);
+        p.el.setAttribute("cx", pt.x); p.el.setAttribute("cy", pt.y);
+        if (f >= 1) { p.state = "held"; p.el.remove(); p.el = null; buffer.add(p.seq); }
+      }
+    }
+
+    // Deliver in order; a sequence number a cut path took with it is skipped.
+    for (;;) {
+      const p = packets.get(nextOut);
+      if (!p) break;
+      if (p.state === "lost") { packets.delete(nextOut++); continue; }
+      if (p.state !== "held") break;
+      buffer.delete(nextOut); packets.delete(nextOut++);
+      const start = Math.max(now, lastOut + OUT_GAP);
+      lastOut = start;
+      outQ.push({ start, color: PATHS[p.path].color, el: null });
+      delivered++;
+    }
+    outQ = outQ.filter(o => {
+      if (now < o.start) return true;
+      if (!o.el) o.el = pkt(o.color, 3.4);
+      const f = (now - o.start) * OUT_SPEED / outLine.len;
+      if (f >= 1) { o.el.remove(); return false; }
+      const pt = outLine.getPointAtLength(f * outLine.len);
+      o.el.setAttribute("cx", pt.x); o.el.setAttribute("cy", pt.y);
+      o.el.style.opacity = f > .85 ? (1 - f) / .15 : 1;
+      return true;
+    });
+  }
+
+  let last = 0, visible = true, raf = 0, shareAt = 0;
+  function frame(t) {
+    raf = 0;
+    if (!visible || reduce.matches) { last = 0; return; }
+    const dt = last ? Math.min(50, t - last) : 16;
+    last = t;
+    step(dt);
+    if (now - shareAt > 300) { shareAt = now; shares(); }
+    raf = requestAnimationFrame(frame);
+  }
+  const go = () => { if (!raf && visible && !reduce.matches) raf = requestAnimationFrame(frame); };
+
+  build();
+  addEventListener("resize", () => { build(); });
+  new IntersectionObserver(es => { visible = es[0].isIntersecting; go(); }).observe(svg);
+  reduce.addEventListener("change", () => {
+    document.getElementById("live").hidden = reduce.matches;
+    go();
+  });
+  if (reduce.matches) {
+    document.getElementById("live").hidden = true;
+    count.textContent = "Animation off (reduced motion)";
+  }
+  go();
+})();
+</script>
+</body>
+</html>

@@ -311,6 +311,7 @@ core/node        aggregator, hub and relay assembled from the above
 core/mobile      the same core as the phone apps call it
 core/sim         impaired links for tests
 web/             the dashboard
+site/            the project page at bond.cartercole.net
 android/ ios/    the phone apps
 deploy/          AWS, Google Cloud, Azure, Docker, Cloudflare, the Homebrew formula,
                  and push.sh for any server
