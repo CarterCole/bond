@@ -1,0 +1,63 @@
+# The Debian package, for the apt repository at apt.cartercole.net:
+#
+#   sudo apt install bond
+#
+# `make release` builds one per Linux archive with nfpm, from the files that go
+# into the archive. It sets VERSION (the release, without the "v"), DEB_ARCH
+# (amd64, arm64 or armhf) and DIR (the archive's directory: bondd, bond,
+# README.md, LICENSE and NOTICE).
+name: bond
+version: ${VERSION}
+release: 1
+arch: ${DEB_ARCH}
+maintainer: Carter Cole <carter@cartercole.com>
+homepage: https://github.com/CarterCole/bond
+license: AGPL-3.0-only
+section: net
+priority: optional
+description: |-
+  Combine several internet connections into one for live streaming
+  Bond splits WireGuard's packets across every uplink a machine can reach
+  (WiFi, ethernet, tethered phones) and puts them back in order on an
+  aggregator, a server with a public address. When one uplink dies the rest
+  keep going without the connection dropping.
+  .
+  bondd is the daemon (aggregator, hub or relay); bond shows its status.
+# Kernel mode runs ip to set up the tunnel, and an aggregator drives iptables.
+# Neither is needed with --userspace.
+recommends:
+  - iproute2
+  - iptables
+
+# expand: nfpm substitutes ${DIR} in a source path only when asked.
+contents:
+  - src: ${DIR}/bondd
+    dst: /usr/bin/bondd
+    expand: true
+    file_info:
+      mode: 0755
+  - src: ${DIR}/bond
+    dst: /usr/bin/bond
+    expand: true
+    file_info:
+      mode: 0755
+  - src: ${DIR}/README.md
+    dst: /usr/share/doc/bond/README.md
+    expand: true
+    file_info:
+      mode: 0644
+  - src: ${DIR}/LICENSE
+    dst: /usr/share/doc/bond/copyright
+    expand: true
+    file_info:
+      mode: 0644
+  - src: ${DIR}/NOTICE
+    dst: /usr/share/doc/bond/NOTICE
+    expand: true
+    file_info:
+      mode: 0644
+
+scripts:
+  postinstall: deploy/debian/postinst
+  preremove: deploy/debian/prerm
+  postremove: deploy/debian/postrm

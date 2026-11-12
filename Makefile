@@ -3,7 +3,7 @@
 #   make            build bondd and bond into bin/
 #   make test       run the Go test suite
 #   make install    install both into /usr/local/bin (sudo)
-#   make release    release archives and the Homebrew formula into dist/release
+#   make release    release archives, .debs and the Homebrew formula into dist/release
 #   make android    build the Android app (debug APK)
 #   make ios        generate the Xcode project and build for the simulator
 #
@@ -66,8 +66,15 @@ dist:
 
 # One archive per platform, their checksums, and the Homebrew formula that
 # installs them (dist/release/bond.rb, for the tap). Each archive carries the
-# license and NOTICE, the licenses of the third-party code compiled in.
+# license and NOTICE, the licenses of the third-party code compiled in. Each
+# Linux platform also gets a Debian package of the same files, for
+# apt.cartercole.net (deploy/debian/nfpm.yaml).
 RELEASE_TARGETS := linux/amd64 linux/arm64 linux/arm darwin/arm64 darwin/amd64
+
+# GOARCH:Debian architecture. Go's linux/arm is ARMv7 with hardware floating
+# point, which is Debian's armhf.
+DEB_ARCHS := amd64:amd64 arm64:arm64 arm:armhf
+NFPM := go run github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.48.0
 
 release:
 	@rm -rf dist/release && mkdir -p dist/release
@@ -77,14 +84,18 @@ release:
 			-o dist/release/bond-$(RELEASE_VERSION)-$$os-$$arch/ ./cmd/... || exit 1; \
 	done
 	@deploy/notices.sh dist/release/*/bondd dist/release/*/bond > dist/release/NOTICE
+	@for d in dist/release/bond-*/; do cp README.md LICENSE dist/release/NOTICE $$d; done
+	@rm dist/release/NOTICE
+	@for a in $(DEB_ARCHS); do \
+		VERSION=$(RELEASE_VERSION) DEB_ARCH=$${a#*:} DIR=dist/release/bond-$(RELEASE_VERSION)-linux-$${a%%:*} \
+			$(NFPM) package --config deploy/debian/nfpm.yaml --packager deb --target dist/release/ || exit 1; \
+	done
 	@for d in dist/release/bond-*/; do \
 		name=$$(basename $$d); echo "  $$name.tar.gz"; \
-		cp README.md LICENSE dist/release/NOTICE $$d; \
 		COPYFILE_DISABLE=1 tar -C dist/release -czf dist/release/$$name.tar.gz $$name || exit 1; \
 		rm -r $$d; \
 	done
-	@rm dist/release/NOTICE
-	@cd dist/release && shasum -a 256 *.tar.gz > checksums.txt
+	@cd dist/release && shasum -a 256 *.tar.gz *.deb > checksums.txt
 	@deploy/homebrew/formula.sh $(RELEASE_VERSION) $(RELEASE_URL) dist/release > dist/release/bond.rb
 	@echo "  bond.rb"
 

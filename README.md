@@ -41,9 +41,17 @@ On a Mac, or on Linux with Homebrew:
 brew install cartercole/tap/bond
 ```
 
-Each release also has archives for Linux on x86, ARM64 and 32-bit ARM (a
-Raspberry Pi). To build it yourself you need Go 1.27+: `make build` puts
-`bondd` and `bond` in `bin/`.
+On Debian 12+, Ubuntu 22.04+ or Raspberry Pi OS, from
+[apt.cartercole.net](https://apt.cartercole.net):
+
+```bash
+sudo curl -fsSLo /etc/apt/sources.list.d/cartercole.sources https://apt.cartercole.net/cartercole.sources
+sudo apt update && sudo apt install bond
+```
+
+Each release also has the .deb packages, and archives for Linux on x86, ARM64
+and 32-bit ARM (a Raspberry Pi 2 or newer). To build it yourself you need Go
+1.27+: `make build` puts `bondd` and `bond` in `bin/`.
 
 **1. Aggregator** — on a Linux server with UDP and TCP port 7777 open:
 
@@ -116,7 +124,8 @@ running `bondd`. On the aggregator it shows the join QR and every device.
 installs a systemd unit on Linux or a launchd daemon on macOS. Pass `--join` and
 it joins on the spot, so the code never ends up in a unit file. After an
 upgrade (`brew upgrade bond`, or a new binary) `sudo bondd service restart hub`
-puts the new version to work.
+puts the new version to work. `apt upgrade` restarts the services itself, and
+`apt remove bond` stops them.
 
 ## Paths and policies
 
@@ -252,6 +261,7 @@ Measured, not estimated:
 | Aggregator restarted under a running hub | traffic resumes in about 1 s |
 | `deploy/push.sh` to an Ubuntu 24.04 server on a home LAN, then again to upgrade | installs the service, runs in kernel mode, prints the join code; the second run restarts it on the new binary |
 | Tagging v0.1.0: the release workflow, then `brew install cartercole/tap/bond` on macOS (Apple Silicon) | tests pass on GitHub, archives published, tap updated; installs `bondd` and `bond`; `brew test` starts an aggregator and gets its join code; `brew audit --strict --online` passes |
+| The v0.1.0 binaries packaged by `deploy/debian/nfpm.yaml`, installed with apt from a signed local copy of apt.cartercole.net | installs on Debian 12 and 13 and Ubuntu 22.04 and 24.04, amd64 and arm64, and on armhf Debian 12 and 13 and Ubuntu 24.04; `bondd` and `bond` run. Under systemd, an upgrade restarts a service `bondd service install` made, a stopped one stays stopped, `apt remove` stops and disables it, `apt purge` deletes its unit and keeps `/var/lib/bond` |
 
 `make test` runs the suite (about a minute): unit tests, the engine against
 simulated impaired links, the whole stack in one process, and real nodes over

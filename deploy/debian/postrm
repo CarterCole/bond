@@ -1,0 +1,14 @@
+#!/bin/sh
+# A purge deletes the unit files `bondd service install` wrote. It leaves
+# /var/lib/bond: on an aggregator that is the mesh's identity, which every hub
+# that joined depends on, and on a hub it is the device's membership.
+set -e
+
+if [ "$1" = purge ]; then
+	rm -f /etc/systemd/system/bond-server.service \
+		/etc/systemd/system/bond-hub.service \
+		/etc/systemd/system/bond-relay.service
+	if [ -d /run/systemd/system ]; then
+		systemctl daemon-reload || true
+	fi
+fi

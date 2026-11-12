@@ -1,0 +1,12 @@
+#!/bin/sh
+# On removal, stop and disable the services `bondd service install` set up,
+# which would otherwise restart forever without a binary. Their unit files stay
+# until a purge, so installing bond again and enabling them brings them back.
+set -e
+
+if [ "$1" = remove ] && [ -d /run/systemd/system ]; then
+	for role in server hub relay; do
+		[ -e "/etc/systemd/system/bond-$role.service" ] || continue
+		systemctl disable --now "bond-$role.service" || true
+	done
+fi
