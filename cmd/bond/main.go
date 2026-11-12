@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"strconv"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/CarterCole/bond/core/bond"
 	"github.com/CarterCole/bond/core/classify"
+	"github.com/CarterCole/bond/core/control"
 	"github.com/CarterCole/bond/core/node"
 	"github.com/CarterCole/bond/core/portmap"
 	"github.com/CarterCole/bond/core/rendezvous"
@@ -37,14 +39,25 @@ Usage:
   bond priority remove <device|port>...
   bond relay add <ip:port>              use a relay that discovery did not find
   bond join <code> [--name N]           join a mesh without starting the daemon
+  bond dashboard                        print the dashboard's address, with the right to make changes
 
 On the aggregator:
   bond code [--once] [--ttl 10m]        show the join code, or mint a limited one
+  bond code --rotate                    replace the join code: the old one stops working
+  bond codes                            the join codes that work, by id
+  bond code revoke <id>                 stop one of them working
   bond devices                          who is in the mesh
   bond kick <id>                        remove a device from the mesh
 
-Global flag:
+On a rendezvous, bond code shows the pairing code.
+
+Global flags:
   --admin <addr>    the daemon's status API (default 127.0.0.1:7780, or $BOND_ADMIN)
+  --state <dir>     the daemon's state directory, where its admin token is
+                    (default: where bondd keeps it, or $BOND_STATE)
+
+Showing a code and making changes need the daemon's admin token, which only
+the user bondd runs as can read: use sudo when bondd runs as a service.
 
 Path policies:
   primary   preferred while healthy
@@ -53,23 +66,32 @@ Path policies:
   off       never used
 `
 
-var admin = "127.0.0.1:7780"
+var (
+	admin    = "127.0.0.1:7780"
+	stateDir string // --state: where the daemon's admin token is
+)
+
+// globalFlag removes "--name value" or "--name=value" from anywhere in args.
+func globalFlag(args []string, name string, into *string) []string {
+	for i := 0; i < len(args); i++ {
+		if v, ok := strings.CutPrefix(args[i], "--"+name+"="); ok {
+			*into, args = v, append(args[:i:i], args[i+1:]...)
+			i--
+		} else if args[i] == "--"+name && i+1 < len(args) {
+			*into, args = args[i+1], append(args[:i:i], args[i+2:]...)
+			i--
+		}
+	}
+	return args
+}
 
 func main() {
 	args := os.Args[1:]
 	if v := os.Getenv("BOND_ADMIN"); v != "" {
 		admin = v
 	}
-	// --admin may appear anywhere.
-	for i := 0; i < len(args); i++ {
-		if v, ok := strings.CutPrefix(args[i], "--admin="); ok {
-			admin, args = v, append(args[:i:i], args[i+1:]...)
-			i--
-		} else if args[i] == "--admin" && i+1 < len(args) {
-			admin, args = args[i+1], append(args[:i:i], args[i+2:]...)
-			i--
-		}
-	}
+	args = globalFlag(args, "admin", &admin)
+	args = globalFlag(args, "state", &stateDir)
 	if len(args) == 0 {
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
@@ -88,6 +110,10 @@ func main() {
 		err = cmdJoin(rest)
 	case "code":
 		err = cmdCode(rest)
+	case "codes":
+		err = cmdCodes()
+	case "dashboard":
+		err = cmdDashboard()
 	case "devices":
 		err = cmdDevices()
 	case "kick":
@@ -108,35 +134,92 @@ func main() {
 
 var client = &http.Client{Timeout: 5 * time.Second}
 
+// adminTokens finds the admin tokens this user can read, and the state
+// directories it found one in but could not read. Without --state that is
+// both where a daemon run by this user and one run as root keep theirs.
+func adminTokens() (toks, denied []string) {
+	if t := os.Getenv("BOND_ADMIN_TOKEN"); t != "" {
+		return []string{t}, nil
+	}
+	dirs := []string{node.DefaultStateDir()}
+	if stateDir != "" {
+		dirs = []string{stateDir}
+	} else if sys := node.SystemStateDir(); sys != dirs[0] {
+		dirs = append(dirs, sys)
+	}
+	for _, d := range dirs {
+		switch t, err := node.ReadAdminToken(d); {
+		case err == nil:
+			toks = append(toks, t)
+		case errors.Is(err, fs.ErrPermission):
+			denied = append(denied, d)
+		}
+	}
+	return toks, denied
+}
+
+func needToken(denied []string) error {
+	if len(denied) > 0 {
+		return fmt.Errorf("this needs the daemon's admin token, in %s, which only the user bondd runs as can read: run bond with sudo", denied[0])
+	}
+	return errors.New("this needs the daemon's admin token: run bond as the user bondd runs as (with sudo, for a service), or point it at the daemon's state directory with --state")
+}
+
+// send makes one request to the daemon, with an admin token the daemon
+// accepts if this user has one, and returns the reply's status and body.
+func send(method, path string, body []byte) (status int, data []byte, asAdmin bool, err error) {
+	toks, denied := adminTokens()
+	for _, tok := range append(toks, "") {
+		var rd io.Reader
+		if body != nil {
+			rd = bytes.NewReader(body)
+		}
+		req, err := http.NewRequest(method, "http://"+admin+path, rd)
+		if err != nil {
+			return 0, nil, false, err
+		}
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		if tok != "" {
+			req.Header.Set("Authorization", "Bearer "+tok)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return 0, nil, false, fmt.Errorf("no bondd answering at %s — is it running? (%v)", admin, unwrap(err))
+		}
+		data, _ = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusUnauthorized {
+			if tok != "" {
+				continue // another daemon's token: try the next, then none
+			}
+			return resp.StatusCode, data, false, needToken(denied)
+		}
+		return resp.StatusCode, data, resp.Header.Get("X-Bond-Admin") == "1", nil
+	}
+	return 0, nil, false, needToken(denied)
+}
+
 // call talks to the daemon. out, when not nil, receives the decoded reply.
 func call(method, path string, in, out any) error {
-	var body io.Reader
+	var body []byte
 	if in != nil {
-		b, _ := json.Marshal(in)
-		body = bytes.NewReader(b)
+		body, _ = json.Marshal(in)
 	}
-	req, err := http.NewRequest(method, "http://"+admin+path, body)
+	status, data, _, err := send(method, path, body)
 	if err != nil {
 		return err
 	}
-	if in != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("no bondd answering at %s — is it running? (%v)", admin, unwrap(err))
-	}
-	defer resp.Body.Close()
-	data, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
+	if status != http.StatusOK {
 		var e struct{ Error string }
 		if json.Unmarshal(data, &e) == nil && e.Error != "" {
 			return errors.New(e.Error)
 		}
-		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
+		if status == http.StatusNotFound || status == http.StatusMethodNotAllowed {
 			return errors.New("the daemon at " + admin + " is not in a role that supports this command")
 		}
-		return fmt.Errorf("daemon said %s: %s", resp.Status, strings.TrimSpace(string(data)))
+		return fmt.Errorf("daemon said %d %s: %s", status, http.StatusText(status), strings.TrimSpace(string(data)))
 	}
 	if out != nil {
 		return json.Unmarshal(data, out)
@@ -177,14 +260,13 @@ type status struct {
 	PairingCode string                   `json:"pairing_code"`
 }
 
+// getStatus reads the status document: with the codes in it when this user
+// holds the daemon's admin token, without them otherwise.
 func getStatus() (*status, []byte, error) {
-	req, _ := http.NewRequest(http.MethodGet, "http://"+admin+"/api/status", nil)
-	resp, err := client.Do(req)
+	_, raw, _, err := send(http.MethodGet, "/api/status", nil)
 	if err != nil {
-		return nil, nil, fmt.Errorf("no bondd answering at %s — is it running? (%v)", admin, unwrap(err))
+		return nil, nil, err
 	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
 	var st status
 	if err := json.Unmarshal(raw, &st); err != nil {
 		return nil, nil, fmt.Errorf("unintelligible status from %s: %w", admin, err)
@@ -316,7 +398,7 @@ func render(w io.Writer, st *status) {
 		r := st.Rendezvous
 		fmt.Fprintf(w, "rendezvous  %s  %d aggregator(s) registered   forwarded up %s   down %s   refused %d\n",
 			r.Public, len(r.Aggregators), size(r.UpBytes), size(r.DownBytes), r.Refused)
-		fmt.Fprintln(w, "pairing code:", st.PairingCode)
+		fmt.Fprintln(w, "pairing code:", firstNonEmpty(st.PairingCode, "(needs the admin token: sudo bond code)"))
 		if len(r.Aggregators) > 0 {
 			fmt.Fprintln(w)
 			tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
@@ -539,7 +621,7 @@ func cmdJoin(args []string) error {
 	if code == "" {
 		return errors.New("usage: bond join <code> [--name N] [--kind hub|relay]")
 	}
-	dir := *state
+	dir := firstNonEmpty(*state, stateDir) // --state may have been taken as the global flag
 	if dir == "" {
 		dir = node.DefaultStateDir()
 	}
@@ -553,33 +635,61 @@ func cmdJoin(args []string) error {
 }
 
 func cmdCode(args []string) error {
+	if len(args) > 0 && args[0] == "revoke" {
+		if len(args) != 2 {
+			return errors.New("usage: bond code revoke <id>   (ids are shown by: bond codes)")
+		}
+		if err := call(http.MethodPost, "/api/code/revoke", map[string]string{"id": args[1]}, nil); err != nil {
+			return err
+		}
+		fmt.Println("revoked join code", args[1], "— devices that joined with it stay in the mesh: bond kick removes one")
+		return nil
+	}
 	fs := flag.NewFlagSet("bond code", flag.ExitOnError)
 	once := fs.Bool("once", false, "mint a code that admits a single device")
 	ttl := fs.Duration("ttl", 0, "mint a code that expires after this long (e.g. 10m)")
+	rotate := fs.Bool("rotate", false, "replace the standing join code; the old one stops working")
 	fs.Parse(args)
 	var code string
-	if *once || *ttl > 0 {
+	switch {
+	case *rotate:
+		var out struct{ Code string }
+		if err := call(http.MethodPost, "/api/code/rotate", map[string]string{}, &out); err != nil {
+			return err
+		}
+		code = out.Code
+		fmt.Fprintln(os.Stderr, "The previous join code no longer works. Devices that joined with it stay in the mesh.")
+	case *once || *ttl > 0:
 		req := map[string]int{"ttl_seconds": int(ttl.Seconds())}
 		if *once {
 			req["max_uses"] = 1
 		}
-		var out struct{ Code string }
+		var out struct{ Code, ID string }
 		if err := call(http.MethodPost, "/api/code", req, &out); err != nil {
 			return err
 		}
 		code = out.Code
-	} else {
+		fmt.Fprintln(os.Stderr, "id", out.ID, "(bond code revoke "+out.ID+" stops it working)")
+	default:
 		st, _, err := getStatus()
 		if err != nil {
 			return err
 		}
-		if st.Role != "aggregator" {
+		switch st.Role {
+		case "aggregator":
+			code = st.JoinCode
+		case "rendezvous":
+			code = st.PairingCode
+		default:
 			return errors.New("join codes come from the aggregator: run this on the server")
 		}
-		code = st.JoinCode
+		if code == "" {
+			_, denied := adminTokens()
+			return needToken(denied)
+		}
 	}
 	fmt.Println(code)
-	if st, err := os.Stdout.Stat(); err == nil && st.Mode()&os.ModeCharDevice != 0 {
+	if st, err := os.Stdout.Stat(); err == nil && st.Mode()&os.ModeCharDevice != 0 && strings.HasPrefix(code, "bond://") {
 		fmt.Println()
 		qrterminal.GenerateWithConfig(code, qrterminal.Config{
 			Level: qrterminal.M, Writer: os.Stdout, HalfBlocks: true, QuietZone: 2,
@@ -588,6 +698,50 @@ func cmdCode(args []string) error {
 		})
 	}
 	return nil
+}
+
+func cmdCodes() error {
+	var codes []control.TokenInfo
+	if err := call(http.MethodGet, "/api/codes", nil, &codes); err != nil {
+		return err
+	}
+	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "ID\tNOTE\tCREATED\tEXPIRES\tUSES")
+	for _, c := range codes {
+		expires, uses := "never", strconv.Itoa(c.Uses)
+		if !c.Expires.IsZero() {
+			expires = c.Expires.Local().Format("2006-01-02 15:04")
+		}
+		if c.MaxUses > 0 {
+			uses += " of " + strconv.Itoa(c.MaxUses)
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", c.ID, c.Note, c.Created.Local().Format("2006-01-02 15:04"), expires, uses)
+	}
+	return tw.Flush()
+}
+
+// cmdDashboard prints the dashboard's address with the admin token in it,
+// for a browser on this machine. The token stays in the address's fragment,
+// which a browser never sends anywhere.
+func cmdDashboard() error {
+	toks, denied := adminTokens()
+	for _, tok := range toks {
+		req, _ := http.NewRequest(http.MethodGet, "http://"+admin+"/api/status", nil)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		resp, err := client.Do(req)
+		if err != nil {
+			return fmt.Errorf("no bondd answering at %s — is it running? (%v)", admin, unwrap(err))
+		}
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			fmt.Println("Open this in a browser on this machine (it carries the right to make changes; keep it to yourself):")
+			fmt.Println()
+			fmt.Println("    http://" + admin + "/#token=" + tok)
+			return nil
+		}
+	}
+	fmt.Println("Read-only dashboard: http://" + admin)
+	return needToken(denied)
 }
 
 func cmdDevices() error {
@@ -626,5 +780,6 @@ func cmdKick(args []string) error {
 		return err
 	}
 	fmt.Println("removed device", id)
+	fmt.Println("It can join again with any join code it still holds: bond code --rotate replaces the standing one, bond codes lists the rest.")
 	return nil
 }

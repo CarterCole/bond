@@ -71,7 +71,8 @@ func Join(code, deviceName, kind string) (string, error) {
 }
 
 // Refresh looks the aggregator's name up and returns the config with the
-// answer recorded in it. Call it just BEFORE asking the OS to establish the
+// answer recorded in it, along with the generation the next start runs as.
+// Call it just BEFORE every start, before asking the OS to establish the
 // tunnel (VpnService.Builder.establish, setTunnelNetworkSettings), pass the
 // result to StartClient or StartRelay, and store it.
 //
@@ -79,8 +80,13 @@ func Join(code, deviceName, kind string) (string, error) {
 // cannot be looked up in order to bring the tunnel up. The core connects on
 // the address remembered in the config; this is what keeps that address
 // current if the aggregator has moved since the phone was last connected.
+//
+// The generation tells the aggregator this start from replays of an earlier
+// one. It has to grow with every start, and a phone has nowhere else to keep
+// it, so the config comes back changed every time.
+//
 // It blocks for up to a few seconds and never fails: if the lookup does not
-// work, the config comes back unchanged.
+// work, the old address is kept.
 func Refresh(configJSON string) string {
 	cfg, err := node.ParseConfig([]byte(configJSON))
 	if err != nil {
@@ -88,9 +94,8 @@ func Refresh(configJSON string) string {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
-	if !cfg.Refresh(ctx) {
-		return configJSON
-	}
+	cfg.Refresh(ctx)
+	cfg.NextGen()
 	return string(cfg.JSON())
 }
 

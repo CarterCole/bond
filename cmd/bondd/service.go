@@ -4,14 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 
 	"github.com/CarterCole/bond/core/control"
 	"github.com/CarterCole/bond/core/node"
+	"github.com/CarterCole/bond/core/rendezvous"
 )
 
 // A service is a role kept running by the operating system's own service
@@ -152,11 +155,36 @@ func runService(args []string) error {
 				return errors.New("this device has not joined a mesh yet: add --join <code>")
 			}
 		}
+		// A rendezvous's pairing code likewise: unit files are readable by
+		// all, and so is every process's command line. It goes in the state
+		// directory, and the service is pointed at the file.
+		if role == "server" {
+			var via string
+			if rest, via = stripFlag(rest, "via"); via != "" {
+				if _, err := rendezvous.ParseCode(via); err != nil {
+					return err
+				}
+				dir := stateDirFrom(rest)
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					return err
+				}
+				file := filepath.Join(dir, "via-code")
+				if err := os.WriteFile(file, []byte(via+"\n"), 0o600); err != nil {
+					return err
+				}
+				rest = append(rest, "--via-file", file)
+				fmt.Println("pairing code saved in", file)
+			}
+		}
+		run, err := serviceExe(exe)
+		if err != nil {
+			return err
+		}
 		var u unit
 		if runtime.GOOS == "linux" {
-			u = systemdUnit(exe, role, rest)
+			u = systemdUnit(run, role, rest)
 		} else {
-			u = launchdPlist(exe, role, rest)
+			u = launchdPlist(run, role, rest)
 		}
 		if err := os.WriteFile(u.path, []byte(u.content), 0o644); err != nil {
 			return err
@@ -187,6 +215,7 @@ func runService(args []string) error {
 		return nil
 
 	case "uninstall":
+		defer removeCopyIfUnused()
 		if runtime.GOOS == "linux" {
 			sys("systemctl", "disable", "--now", systemdName+role)
 			os.Remove("/etc/systemd/system/" + systemdName + role + ".service")
@@ -197,7 +226,11 @@ func runService(args []string) error {
 
 	case "restart":
 		// After an upgrade the unit already points at the new binary (see
-		// stableExe) but the old one is still running.
+		// stableExe) but the old one is still running. Or it points at the
+		// copy serviceExe made, which is brought up to date first.
+		if err := refreshCopy(exe); err != nil {
+			return err
+		}
 		if runtime.GOOS == "linux" {
 			return sys("systemctl", "restart", systemdName+role)
 		}
@@ -237,6 +270,121 @@ func stableExe(exe string) string {
 		return exe
 	}
 	return opt
+}
+
+// A service runs as root. If its binary could be replaced by anyone else —
+// a Homebrew install belongs to the user who ran brew — then anything running
+// as that user could become root at the next restart. So a service only ever
+// runs a binary that root alone can change: the one installing it, if it is
+// that, or a copy kept where only root can write.
+func copyDir() string {
+	if runtime.GOOS == "darwin" {
+		return "/Library/Application Support/Bond"
+	}
+	return "/usr/local/libexec/bond"
+}
+
+func copyPath() string { return filepath.Join(copyDir(), "bondd") }
+
+// serviceExe is the binary a service should run, given the one installing it.
+func serviceExe(exe string) (string, error) {
+	why := rootOnly(exe)
+	if why == nil {
+		return exe, nil
+	}
+	if err := copyExe(exe); err != nil {
+		return "", err
+	}
+	fmt.Printf("%s can be changed without root (%v), so the service runs a copy: %s.\n", exe, why, copyPath())
+	fmt.Println("After upgrading, `sudo bondd service restart <role>` brings the copy up to date.")
+	return copyPath(), nil
+}
+
+// refreshCopy brings the copy up to date from exe, if there is a copy and
+// exe is not it.
+func refreshCopy(exe string) error {
+	if _, err := os.Stat(copyPath()); err != nil || exe == copyPath() {
+		return nil
+	}
+	return copyExe(exe)
+}
+
+func copyExe(exe string) error {
+	dir := copyDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	if err := rootOnly(dir); err != nil {
+		return fmt.Errorf("cannot keep the service's binary where only root can change it: %w", err)
+	}
+	src, err := os.Open(exe)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	tmp, err := os.CreateTemp(dir, ".bondd-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := io.Copy(tmp, src); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o755); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), copyPath())
+}
+
+// removeCopyIfUnused removes the copy once no service is left to run it.
+func removeCopyIfUnused() {
+	pattern := "/etc/systemd/system/" + systemdName + "*.service"
+	if runtime.GOOS == "darwin" {
+		pattern = "/Library/LaunchDaemons/" + launchdLabel + "*.plist"
+	}
+	if left, _ := filepath.Glob(pattern); len(left) == 0 {
+		os.Remove(copyPath())
+		os.Remove(copyDir())
+	}
+}
+
+// rootOnly reports why p could be changed by someone other than root, or
+// nil if it could not: p and every directory above it, along the path as
+// given and the path it resolves to, must belong to root and be writable by
+// nobody else (a sticky directory, such as /tmp, aside).
+func rootOnly(p string) error {
+	resolved, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		return err
+	}
+	for _, start := range []string{p, resolved} {
+		for q := start; ; q = filepath.Dir(q) {
+			st, err := os.Lstat(q)
+			if err != nil {
+				return err
+			}
+			// A symlink cannot be changed in place, only replaced through
+			// its directory, which is checked too; where it points is
+			// checked along the resolved path.
+			if st.Mode()&os.ModeSymlink == 0 {
+				if sys, ok := st.Sys().(*syscall.Stat_t); ok && sys.Uid != 0 {
+					return fmt.Errorf("%s belongs to uid %d", q, sys.Uid)
+				}
+				if st.Mode().Perm()&0o022 != 0 && st.Mode()&os.ModeSticky == 0 {
+					return fmt.Errorf("%s can be written by others", q)
+				}
+			}
+			if q == filepath.Dir(q) {
+				break
+			}
+		}
+	}
+	return nil
 }
 
 func sys(name string, args ...string) error {

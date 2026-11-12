@@ -10,6 +10,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -142,7 +143,18 @@ func runServer(args []string) error {
 	fs.StringVar(&o.TLSKey, "tls-key", "", "private key for --tls-cert, PEM")
 	fs.BoolVar(&o.NoUPnP, "no-upnp", false, "do not ask the router in front of this machine to forward the port (UPnP)")
 	fs.StringVar(&o.Via, "via", "", "pairing code of a rendezvous: needs no inbound port; devices reach this server through the rendezvous")
+	viaFile := fs.String("via-file", "", "a file holding the pairing code, instead of --via: keeps it out of process listings (`bondd service install` does this)")
 	fs.Parse(args)
+	if *viaFile != "" {
+		if o.Via != "" {
+			return errors.New("--via and --via-file are two ways of saying the same thing: give one")
+		}
+		b, err := os.ReadFile(*viaFile)
+		if err != nil {
+			return err
+		}
+		o.Via = strings.TrimSpace(string(b))
+	}
 
 	o.StateDir, o.Admin, o.Log = c.stateDir(), c.admin, c.logger()
 	s, err := node.StartServer(o)
@@ -159,7 +171,13 @@ func runServer(args []string) error {
 	return nil
 }
 
+// printJoin shows the join code to whoever started the server. Not to a log:
+// logs are kept, and often readable by others on the machine.
 func printJoin(code control.JoinCode) {
+	if !isTerminal(os.Stdout) {
+		fmt.Println("The join code is not written to logs. On this machine: bond code (with sudo if bondd runs as root)")
+		return
+	}
 	fmt.Println()
 	fmt.Println("  Join code (anyone holding it can join this mesh — treat it like a password):")
 	fmt.Println()
@@ -194,13 +212,17 @@ func runRendezvous(args []string) error {
 	}
 	defer n.Close()
 	code := n.Code().String()
-	fmt.Println()
-	fmt.Println("  Pairing code (anyone holding it can register an aggregator here — treat it like a password):")
-	fmt.Println()
-	fmt.Println("    " + code)
-	fmt.Println()
-	fmt.Println("  On the aggregator:  sudo bondd server --via '" + code + "'")
-	fmt.Println()
+	if isTerminal(os.Stdout) {
+		fmt.Println()
+		fmt.Println("  Pairing code (anyone holding it can register an aggregator here — treat it like a password):")
+		fmt.Println()
+		fmt.Println("    " + code)
+		fmt.Println()
+		fmt.Println("  On the aggregator:  sudo bondd service install server --via '" + code + "'")
+		fmt.Println()
+	} else {
+		fmt.Println("The pairing code is not written to logs. On this machine: bond code (with sudo if bondd runs as root)")
+	}
 	wait()
 	return nil
 }
@@ -271,7 +293,7 @@ func runRelay(args []string) error {
 	if err != nil {
 		return err
 	}
-	o.Config, o.Admin, o.Log = cfg, c.admin, c.logger()
+	o.Config, o.StateDir, o.Admin, o.Log = cfg, dir, c.admin, c.logger()
 	o.Bind = path.BindOpts{Interface: iface, Network: iface}
 	r, err := node.StartRelay(o)
 	if err != nil {

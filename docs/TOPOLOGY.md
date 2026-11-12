@@ -75,7 +75,7 @@ The aggregator keeps two connections to the rendezvous, both dialled out, so
 no inbound port is needed:
 
 - **control** — a WebSocket on the rendezvous's TCP port, carrying the
-  registration, joins and notices about new sources, every message sealed.
+  registration, joins and notices about sources, every message sealed.
   It is not on TLS yet, so it does not look like HTTPS;
 - **link** — a UDP socket, carrying bonded traffic. What it sends keeps the
   NAT mapping in front of the aggregator alive.
@@ -119,9 +119,10 @@ and passes the datagram along the link in a frame:
 | `link seq` | counts frames each way on the link; roaming uses it as it uses a path's sequence |
 | `tag` | SipHash-2-4 over the frame, keyed by the link key |
 
-When a source is new, the rendezvous tells the aggregator, over the control
-connection, the handle it has given it and the address it was seen from (a
-frame that gets there first is handled all the same). The aggregator gives each handle its own sender, as it gives each
+When the aggregator has verified a source's traffic it confirms the handle
+over the control connection, and the rendezvous tells it the address the
+source was seen from. Confirmed sources keep their place when strangers' would
+crowd them out. The aggregator gives each handle its own sender, as it gives each
 WebSocket connection one today, so a path through the rendezvous is an
 ordinary path whose remote happens to be a handle. Roaming needs nothing new:
 the aggregator moves a path to a new handle only when the datagram inside

@@ -26,21 +26,27 @@ const (
 	wsQueue        = 256
 	wsWriteTimeout = 5 * time.Second
 	wsPingEvery    = 20 * time.Second // well inside proxy idle timeouts
+	// wsIdle closes a connection that has carried no datagram this long. A
+	// live path carries several a second (probes, at the least), so this
+	// only ends connections that are dead, or held open to use one up.
+	wsIdle = 60 * time.Second
 )
 
 // wsConn adapts one WebSocket to Sender. Sends never block the caller: a
 // backed-up connection drops datagrams, as a congested UDP path would.
 type wsConn struct {
-	c    *websocket.Conn
-	out  chan *Buf
-	done chan struct{}
-	once sync.Once
-	name string
+	c        *websocket.Conn
+	out      chan *Buf
+	done     chan struct{}
+	once     sync.Once
+	name     string
+	lastRead atomic.Int64 // unix nanos
 }
 
 func newWSConn(c *websocket.Conn, name string) *wsConn {
 	c.SetReadLimit(MaxPacket)
 	w := &wsConn{c: c, out: make(chan *Buf, wsQueue), done: make(chan struct{}), name: name}
+	w.lastRead.Store(time.Now().UnixNano())
 	go w.writer()
 	return w
 }
@@ -79,6 +85,10 @@ func (w *wsConn) writer() {
 				return
 			}
 		case <-ping.C:
+			if time.Since(time.Unix(0, w.lastRead.Load())) > wsIdle {
+				w.close()
+				return
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), wsWriteTimeout)
 			err := w.c.Ping(ctx)
 			cancel()
@@ -108,6 +118,7 @@ func (w *wsConn) read(h Handler, from func() Remote) {
 		if typ != websocket.MessageBinary || len(data) > MaxPacket {
 			continue
 		}
+		w.lastRead.Store(time.Now().UnixNano())
 		b := Get()
 		b.N = copy(b.B[:], data)
 		h(b, from())

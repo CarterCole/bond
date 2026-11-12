@@ -39,7 +39,9 @@ class ConfigStore(context: Context) {
      */
     fun refreshed(): String? {
         val stored = read() ?: return null
-        val fresh = Mobile.refresh(stored) // never fails: unchanged if the lookup did not work
+        // Never fails. It also records the generation this start runs as, which must grow with
+        // every start, so the result always differs and is always stored.
+        val fresh = Mobile.refresh(stored)
         if (fresh != stored) {
             synchronized(this) {
                 // Unless settings were saved, or the mesh left, while the lookup ran.

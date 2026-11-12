@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -174,7 +175,8 @@ func TestHubReachesInternetThroughAggregator(t *testing.T) {
 }
 
 func TestAdminAPI(t *testing.T) {
-	s := startServer(t, t.TempDir(), "127.0.0.1:0")
+	sdir := t.TempDir()
+	s := startServer(t, sdir, "127.0.0.1:0")
 	cfg, dir := join(t, s, "studio", control.KindHub)
 	h := startHub(t, HubOptions{Config: cfg, StateDir: dir})
 	eventually(t, "paths up", 5*time.Second, func() error {
@@ -184,16 +186,27 @@ func TestAdminAPI(t *testing.T) {
 		return nil
 	})
 	base := "http://" + h.AdminAddr()
+	tok, err := ReadAdminToken(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st, err := os.Stat(filepath.Join(dir, AdminTokenFile)); err != nil || st.Mode().Perm() != 0o600 {
+		t.Fatalf("admin token file: %v %v", st.Mode(), err)
+	}
 
-	do := func(method, url, ctype, body string, host string) (int, string) {
-		req, _ := http.NewRequest(method, url, strings.NewReader(body))
-		if ctype != "" {
-			req.Header.Set("Content-Type", ctype)
+	type req struct{ method, url, ctype, body, host, token string }
+	do := func(r req) (int, string) {
+		hr, _ := http.NewRequest(r.method, r.url, strings.NewReader(r.body))
+		if r.ctype != "" {
+			hr.Header.Set("Content-Type", r.ctype)
 		}
-		if host != "" {
-			req.Host = host
+		if r.host != "" {
+			hr.Host = r.host
 		}
-		resp, err := http.DefaultClient.Do(req)
+		if r.token != "" {
+			hr.Header.Set("Authorization", "Bearer "+r.token)
+		}
+		resp, err := http.DefaultClient.Do(hr)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -201,18 +214,29 @@ func TestAdminAPI(t *testing.T) {
 		b, _ := io.ReadAll(resp.Body)
 		return resp.StatusCode, string(b)
 	}
+	post := func(url, body, token string) (int, string) {
+		return do(req{"POST", url, "application/json", body, "", token})
+	}
 
-	code, body := do("GET", base+"/api/status", "", "", "")
+	code, body := do(req{method: "GET", url: base + "/api/status"})
 	var st HubStatus
 	if code != 200 || json.Unmarshal([]byte(body), &st) != nil || st.Role != "hub" || len(st.Session.Paths) != 2 {
 		t.Fatalf("status: %d %s", code, body)
 	}
-	if code, body := do("GET", base+"/", "", "", ""); code != 200 || !strings.Contains(body, "<title>Bond</title>") {
+	if code, body := do(req{method: "GET", url: base + "/"}); code != 200 || !strings.Contains(body, "<title>Bond</title>") {
 		t.Fatalf("dashboard: %d", code)
 	}
 
+	// Changes need the token; a wrong one is refused even for reading.
+	if code, _ := post(base+"/api/path", `{"name":"b","policy":"backup"}`, ""); code != 401 {
+		t.Fatalf("change without the admin token: %d", code)
+	}
+	if code, _ := do(req{method: "GET", url: base + "/api/status", token: "wrong"}); code != 401 {
+		t.Fatalf("wrong admin token: %d", code)
+	}
+
 	// Change a path's policy: applied, persisted, and told to the aggregator.
-	if code, body := do("POST", base+"/api/path", "application/json", `{"name":"b","policy":"backup"}`, ""); code != 200 {
+	if code, body := post(base+"/api/path", `{"name":"b","policy":"backup"}`, tok); code != 200 {
 		t.Fatalf("set policy: %d %s", code, body)
 	}
 	saved, err := LoadConfig(dir)
@@ -227,44 +251,77 @@ func TestAdminAPI(t *testing.T) {
 		}
 		return fmt.Errorf("still not backup")
 	})
-	if code, _ := do("POST", base+"/api/path", "application/json", `{"name":"nope","policy":"off"}`, ""); code != 400 {
+	if code, _ := post(base+"/api/path", `{"name":"nope","policy":"off"}`, tok); code != 400 {
 		t.Fatalf("unknown path accepted: %d", code)
 	}
-	if code, _ := do("POST", base+"/api/path", "application/json", `{"name":"a","policy":"turbo"}`, ""); code != 400 {
+	if code, _ := post(base+"/api/path", `{"name":"a","policy":"turbo"}`, tok); code != 400 {
 		t.Fatalf("unknown policy accepted: %d", code)
 	}
 
 	// Priority rules.
-	if code, body := do("POST", base+"/api/priority", "application/json", `{"ports":["tcp/1935"],"devices":["192.168.8.50"]}`, ""); code != 200 {
+	if code, body := post(base+"/api/priority", `{"ports":["tcp/1935"],"devices":["192.168.8.50"]}`, tok); code != 200 {
 		t.Fatalf("set priority: %d %s", code, body)
 	}
 	if got := h.Status().Priority; len(got.Ports) != 1 || len(got.Devices) != 1 {
 		t.Fatalf("priority not applied: %+v", got)
 	}
-	if code, _ := do("POST", base+"/api/priority", "application/json", `{"devices":["aa:bb:cc:dd:ee:ff"]}`, ""); code != 400 {
+	if code, _ := post(base+"/api/priority", `{"devices":["aa:bb:cc:dd:ee:ff"]}`, tok); code != 400 {
 		t.Fatalf("MAC priority accepted outside gateway mode: %d", code)
 	}
 
 	// The guards: a web page must not be able to drive this API.
-	if code, _ := do("GET", base+"/api/status", "", "", "evil.example.com"); code != 403 {
+	if code, _ := do(req{method: "GET", url: base + "/api/status", host: "evil.example.com"}); code != 403 {
 		t.Fatalf("DNS-rebinding style Host accepted: %d", code)
 	}
-	if code, _ := do("POST", base+"/api/path", "text/plain", `{"name":"a","policy":"off"}`, ""); code != 415 {
+	if code, _ := do(req{"POST", base + "/api/path", "text/plain", `{"name":"a","policy":"off"}`, "", tok}); code != 415 {
 		t.Fatalf("form-style POST accepted: %d", code)
 	}
 	if up := h.Status().Session.Paths; up[0].Policy == "off" {
 		t.Fatal("rejected request still took effect")
 	}
 
-	// Aggregator side: mint a single-use code, see the QR, remove a node.
+	// Aggregator side: the join code only for the token holder.
 	sbase := "http://" + s.AdminAddr()
-	code, body = do("POST", sbase+"/api/code", "application/json", `{"max_uses":1,"ttl_seconds":600}`, "")
-	var minted struct{ Code string }
+	stok, err := ReadAdminToken(sdir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sst ServerStatus
+	_, body = do(req{method: "GET", url: sbase + "/api/status"})
+	if json.Unmarshal([]byte(body), &sst); sst.JoinCode != "" || sst.JoinQR != "" || sst.JoinCodeID == "" {
+		t.Fatalf("status without the token: code %q qr %d bytes id %q", sst.JoinCode, len(sst.JoinQR), sst.JoinCodeID)
+	}
+	if code, _ := do(req{method: "GET", url: sbase + "/api/qr.svg"}); code != 401 {
+		t.Fatalf("qr without the token: %d", code)
+	}
+	_, body = do(req{method: "GET", url: sbase + "/api/status", token: stok})
+	if json.Unmarshal([]byte(body), &sst); !strings.HasPrefix(sst.JoinCode, "bond://") || !strings.HasPrefix(sst.JoinQR, "data:image/svg+xml;base64,") {
+		t.Fatalf("status with the token: %q", sst.JoinCode)
+	}
+	if code, body := do(req{method: "GET", url: sbase + "/api/qr.svg", token: stok}); code != 200 || !strings.HasPrefix(body, "<svg") {
+		t.Fatalf("qr: %d", code)
+	}
+	if code, _ := post(sbase+"/api/code", `{"max_uses":1}`, ""); code != 401 {
+		t.Fatalf("minted a code without the token: %d", code)
+	}
+
+	// Mint a single-use code, revoke it, rotate the standing one.
+	code, body = post(sbase+"/api/code", `{"max_uses":1,"ttl_seconds":600}`, stok)
+	var minted struct{ Code, ID string }
 	if code != 200 || json.Unmarshal([]byte(body), &minted) != nil || !strings.HasPrefix(minted.Code, "bond://127.0.0.1:") {
 		t.Fatalf("mint code: %d %s", code, body)
 	}
-	if code, body := do("GET", sbase+"/api/qr.svg", "", "", ""); code != 200 || !strings.HasPrefix(body, "<svg") {
-		t.Fatalf("qr: %d", code)
+	if code, body := post(sbase+"/api/code/revoke", `{"id":"`+minted.ID+`"}`, stok); code != 200 || strings.Contains(body, minted.ID) {
+		t.Fatalf("revoke: %d %s", code, body)
+	}
+	old := sst.JoinCode
+	code, body = post(sbase+"/api/code/rotate", `{}`, stok)
+	var rotated struct{ Code string }
+	if code != 200 || json.Unmarshal([]byte(body), &rotated) != nil || rotated.Code == old || s.Status().JoinCode != rotated.Code {
+		t.Fatalf("rotate: %d %s", code, body)
+	}
+	if code, body := do(req{method: "GET", url: sbase + "/api/codes", token: stok}); code != 200 || !strings.Contains(body, `"standing":true`) {
+		t.Fatalf("codes: %d %s", code, body)
 	}
 }
 

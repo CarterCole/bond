@@ -111,13 +111,21 @@ relay:Pixel-9  relay   bonded   up     61 ms  0.4%  2.8 Mbit/s  0 bit/s     2.2 
 ```
 
 The same thing, live, is a dashboard at <http://127.0.0.1:7780> on any machine
-running `bondd`. On the aggregator it shows the join QR and every device.
+running `bondd`. On the aggregator it shows every device. To change anything
+there, or to see the join QR, open the address `bond dashboard` prints
+(`sudo bond dashboard` when bondd runs as a service): it carries the daemon's
+admin token, which only the user bondd runs as can read.
 
 **5. Keep it running.** `sudo bondd service install hub` (or `server`, `relay`, `rendezvous`)
 installs a systemd unit on Linux or a launchd daemon on macOS. Pass `--join` and
-it joins on the spot, so the code never ends up in a unit file. After an
-upgrade (`brew upgrade bond`, or a new binary) `sudo bondd service restart hub`
-puts the new version to work.
+it joins on the spot, so the code never ends up in a unit file (`--via` is kept
+in the state directory for the same reason). A service runs as root, so it
+only runs a binary root alone can change: one installed by Homebrew belongs to
+you, and the service runs a copy instead. After an upgrade (`brew upgrade
+bond`, or a new binary) `sudo bondd service restart hub` brings that copy up to
+date and puts the new version to work. Every device in a mesh needs the same
+protocol version: upgrade the aggregator, any rendezvous, hubs, relays and the
+phone apps together.
 
 ## Paths and policies
 
@@ -208,8 +216,8 @@ that holds the public address, it has none. A **rendezvous** on any small
 public server fixes that:
 
 ```bash
-bondd rendezvous --public rv.example.com          # on the public server: prints a pairing code
-sudo bondd server --via 'bond-rv://…the code…'    # on the aggregator
+bondd rendezvous --public rv.example.com                   # on the public server: prints a pairing code
+sudo bondd service install server --via 'bond-rv://…the code…'   # on the aggregator
 ```
 
 The aggregator dials out to the rendezvous and keeps the connection open, so
@@ -300,11 +308,16 @@ be Bond's WireGuard, not Tailscale's.
   on a path see ciphertext only.
 - A **join code** is a secret: its token never crosses the network, it keys
   the encryption of the join exchange. Holding it lets you join; without it
-  you can neither join nor impersonate the aggregator. `bond code --once
-  --ttl 10m` mints a limited one; `bond kick <id>` removes a device.
-- Path metadata is authenticated per session, so nobody else can redirect a
-  path, and a path only counts as up after a round trip that replayed traffic
-  cannot fake.
+  you can neither join nor impersonate the aggregator, and a reply recorded
+  on its way to one device is no use to another. `bond code --once
+  --ttl 10m` mints a limited one; `bond codes` lists them and `bond code
+  revoke <id>` stops one working.
+- `bond kick <id>` removes a device. It could join again with a code it still
+  holds: `bond code --rotate` replaces the standing one.
+- Path metadata is authenticated per session and per run of each end, so
+  nobody else can redirect a path, traffic recorded before a restart cannot
+  be replayed after it, and a path only counts as up after a round trip that
+  replayed traffic cannot fake.
 - The aggregator refuses to forward to its own loopback and link-local space
   (the cloud metadata service).
 - A relay forwards only to its own mesh's aggregator, only for local
@@ -314,7 +327,13 @@ be Bond's WireGuard, not Tailscale's.
   the last minute. Registering takes its pairing code, which, like a join
   code, never crosses the network.
 - The status API listens on loopback and rejects requests a web page could
-  forge.
+  forge. Codes, and every change, need the daemon's admin token, which only
+  the user bondd runs as can read; nor are codes written to logs.
+- Anyone can open TCP connections to an aggregator or rendezvous: they are
+  capped, per address and in all, and idle ones are closed. A rendezvous
+  keeps the hub sockets its aggregators have confirmed when strangers' would
+  crowd them out.
+- A service never runs a binary that anyone but root could replace.
 - Behind a router, the aggregator asks it (UPnP) to forward its port (and the
   TLS port, with `--tls`) and nothing else, and removes the forwards when it
   stops. It ignores anything on

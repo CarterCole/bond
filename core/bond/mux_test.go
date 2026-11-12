@@ -665,3 +665,150 @@ func TestRecreatedPathWithSameIDComesUpAtOnce(t *testing.T) {
 		t.Fatalf("after: %d of 200 delivered over the re-created path", got)
 	}
 }
+
+// recorder keeps copies of every hub→aggregator datagram it is shown.
+type recorder struct {
+	mu  sync.Mutex
+	got [][]byte
+}
+
+func (r *recorder) tap(b []byte) {
+	r.mu.Lock()
+	r.got = append(r.got, append([]byte(nil), b...))
+	r.mu.Unlock()
+}
+
+// newest returns the recorded datagram of the given type with the highest
+// path sequence: the one most likely to pass for new after a reset.
+func (r *recorder) newest(typ wire.Type) []byte {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var best []byte
+	var bh wire.Header
+	for _, c := range r.got {
+		if h, _ := wire.Parse(c); h.Type == typ && (best == nil || wire.SeqLess(bh.PathSeq, h.PathSeq)) {
+			best, bh = c, h
+		}
+	}
+	return best
+}
+
+func injectFrom(m *Mux, raw []byte, from string) {
+	b := path.Get()
+	b.N = copy(b.B[:], raw)
+	m.Receive(b, path.Remote{S: evil{}, Addr: netip.MustParseAddrPort(from)})
+}
+
+const attacker = "203.0.113.66:6666"
+
+// record taps the hub's traffic while it sends a burst, so that the
+// recording runs well ahead of where a restarted sender's numbering starts.
+func (p *pair) record() *recorder {
+	rec := &recorder{}
+	tap := rec.tap
+	p.tap.Store(&tap)
+	pump(p.hs, wire.ClassBulk, 0, 3000, 500, 16e6)
+	time.Sleep(150 * time.Millisecond)
+	p.tap.Store(nil)
+	return rec
+}
+
+// A datagram recorded before the hub restarted, replayed from anywhere
+// afterwards, must not move the path or stop the new run's traffic.
+func TestReplayAcrossHubRestartIsRefused(t *testing.T) {
+	p := newPair(t)
+	l := sim.Link{Delay: 5 * time.Millisecond}
+	p.addPath(0, sched.PolicyBonded, l, l)
+	p.waitUp(1)
+	out := collect(t, p.srv)
+	rec := p.record()
+
+	p.hub.Close()
+	p.hub = New(Options{Role: Hub, Gen: 101, Log: quiet})
+	p.hs = p.hub.AddSession(testSession, testKey, "hub")
+	p.hs.AddPath(0, "A", "sim", sched.PolicyBonded, p.paths[0].HubRemote())
+	p.waitUp(1)
+	remote := p.ss.Status().Paths[0].Remote
+
+	before := p.srv.RxUnknown.Load()
+	for _, typ := range []wire.Type{wire.TypeData, wire.TypeProbe, wire.TypeHello} {
+		injectFrom(p.srv, rec.newest(typ), attacker)
+	}
+	if got := p.srv.RxUnknown.Load() - before; got != 3 {
+		t.Fatalf("%d of 3 replays from the old run refused", got)
+	}
+	if got := p.ss.Status().Paths[0].Remote; got != remote {
+		t.Fatalf("replay moved the path from %s to %s", remote, got)
+	}
+	pump(p.hs, wire.ClassBulk, 10000, 400, 500, 2e6)
+	time.Sleep(200 * time.Millisecond)
+	if got := out.countRange(10000, 10400); got != 400 {
+		t.Fatalf("after the replay: %d of 400 delivered", got)
+	}
+}
+
+// Without any restart: the hub reopens a path under the same id (a tether
+// replugged), and a datagram from the old socket is replayed.
+func TestReplayAcrossPathReopenIsHarmless(t *testing.T) {
+	p := newPair(t)
+	l := sim.Link{Delay: 5 * time.Millisecond}
+	p.addPath(0, sched.PolicyBonded, l, l)
+	p.waitUp(1)
+	down := collect(t, p.hub)
+	rec := p.record()
+
+	p.hs.AddPath(0, "A", "sim", sched.PolicyBonded, p.paths[0].HubRemote())
+	p.waitUp(1)
+	remote := p.ss.Status().Paths[0].Remote
+	for _, typ := range []wire.Type{wire.TypeData, wire.TypeProbe, wire.TypeHello} {
+		injectFrom(p.srv, rec.newest(typ), attacker)
+	}
+	if got := p.ss.Status().Paths[0].Remote; got != remote {
+		t.Fatalf("replay moved the path from %s to %s", remote, got)
+	}
+	pump(p.ss, wire.ClassBulk, 2000, 400, 500, 2e6)
+	time.Sleep(200 * time.Millisecond)
+	if got := down.countRange(2000, 2400); got != 400 {
+		t.Fatalf("aggregator → hub after the replay: %d of 400 delivered", got)
+	}
+}
+
+// An aggregator that has just started accepts nothing but a hello until it
+// knows which run of the hub to expect, and a hello from an earlier run
+// than one it has adopted is refused.
+func TestOnlyCurrentRunIsAccepted(t *testing.T) {
+	p := newPair(t)
+	l := sim.Link{Delay: 2 * time.Millisecond}
+	p.addPath(0, sched.PolicyBonded, l, l)
+	p.waitUp(1)
+	rec := p.record()
+
+	fresh := New(Options{Role: Server, Gen: 300, Log: quiet})
+	defer fresh.Close()
+	fs := fresh.AddSession(testSession, testKey, "hub")
+	injectFrom(fresh, rec.newest(wire.TypeData), attacker)
+	if n := len(fs.Status().Paths); n != 0 || fresh.RxUnknown.Load() != 1 {
+		t.Fatalf("a fresh aggregator took data before any hello: %d paths, %d refused", n, fresh.RxUnknown.Load())
+	}
+
+	// The hub restarts; its new hello is adopted; the old run's hello is not.
+	p.hub.Close()
+	p.hub = New(Options{Role: Hub, Gen: 101, Log: quiet})
+	p.hs = p.hub.AddSession(testSession, testKey, "hub")
+	p.hs.AddPath(0, "A", "sim", sched.PolicyBonded, p.paths[0].HubRemote())
+	p.waitUp(1)
+	before := p.srv.RxUnknown.Load()
+	injectFrom(p.srv, rec.newest(wire.TypeHello), attacker)
+	if p.srv.RxUnknown.Load() != before+1 {
+		t.Fatal("a hello from an earlier run of the hub was accepted")
+	}
+
+	// A version 1 datagram is refused (and logged once).
+	old := append([]byte(nil), rec.newest(wire.TypeData)...)
+	old[0] = wire.Version1<<4 | old[0]&0x0f
+	before = p.srv.RxUnknown.Load()
+	injectFrom(p.srv, old, attacker)
+	if p.srv.RxUnknown.Load() != before+1 {
+		t.Fatal("a protocol 1 datagram was not refused")
+	}
+}

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/CarterCole/bond/core/tunnel"
+	"github.com/CarterCole/bond/core/wire"
 )
 
 // DefaultNetwork is the address range of a mesh. It sits in 10/8 well away
@@ -194,6 +195,13 @@ func (r *Registry) NewToken(note string, ttl time.Duration, maxUses int) (JoinCo
 func (r *Registry) newToken(note string, ttl time.Duration, maxUses int) (JoinCode, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.mintLocked(note, ttl, maxUses)
+}
+
+func (r *Registry) mintLocked(note string, ttl time.Duration, maxUses int) (JoinCode, error) {
+	// Expired codes answer exactly as unknown ones do: forget them.
+	now := time.Now()
+	r.st.Tokens = slices.DeleteFunc(r.st.Tokens, func(t *Token) bool { return !t.Expires.IsZero() && now.After(t.Expires) })
 	if len(r.st.Public) == 0 {
 		return JoinCode{}, errors.New("the aggregator's public address is not set")
 	}
@@ -235,6 +243,41 @@ func (r *Registry) StandingCode() (JoinCode, error) {
 	}
 	r.mu.Unlock()
 	return r.NewToken("standing", 0, 0)
+}
+
+// RotateStanding replaces the standing join code: the old one stops working
+// at once, devices that joined with it stay joined. It is what makes
+// removing a device stick, since the code it joined with would otherwise let
+// it join again.
+func (r *Registry) RotateStanding() (JoinCode, error) {
+	r.mu.Lock()
+	r.st.Tokens = slices.DeleteFunc(r.st.Tokens, func(t *Token) bool { return t.Note == "standing" })
+	code, err := r.mintLocked("standing", 0, 0)
+	r.mu.Unlock()
+	r.changed()
+	return code, err
+}
+
+// TokenInfo describes a join code without its secret.
+type TokenInfo struct {
+	ID       string    `json:"id"`
+	Note     string    `json:"note,omitempty"`
+	Standing bool      `json:"standing"`
+	Created  time.Time `json:"created"`
+	Expires  time.Time `json:"expires,omitzero"`
+	MaxUses  int       `json:"max_uses,omitempty"`
+	Uses     int       `json:"uses"`
+}
+
+// Tokens lists the join codes the registry holds, oldest first.
+func (r *Registry) Tokens() []TokenInfo {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]TokenInfo, len(r.st.Tokens))
+	for i, t := range r.st.Tokens {
+		out[i] = TokenInfo{ID: t.ID, Note: t.Note, Standing: t.Note == "standing", Created: t.Created, Expires: t.Expires, MaxUses: t.MaxUses, Uses: t.Uses}
+	}
+	return out
 }
 
 // RevokeToken invalidates a join code by id. Devices already joined stay joined.
@@ -399,6 +442,9 @@ func (r *Registry) ServeJoin(w http.ResponseWriter, hr *http.Request) {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
+	// A request is a few hundred bytes: one that trickles in is holding a
+	// connection open, not joining.
+	http.NewResponseController(w).SetReadDeadline(time.Now().Add(15 * time.Second))
 	data, err := io.ReadAll(io.LimitReader(hr.Body, 16<<10))
 	if err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -444,24 +490,34 @@ func (r *Registry) Join(data []byte) (int, []byte) {
 	var reply joinReply
 	var joined *Node
 	var req JoinRequest
-	if err := json.Unmarshal(pt, &req); err != nil {
+	aad := replyAAD(env)
+	switch err := json.Unmarshal(pt, &req); {
+	case err != nil:
 		reply.Error = "malformed request"
-	} else if known := r.known(req.WGPublic); !known && tok.MaxUses > 0 && tok.Uses >= tok.MaxUses {
+	case req.Proto < wire.Version:
+		// Sealed the way such a device reads replies, so that it can say why.
+		reply.Error = fmt.Sprintf("the aggregator runs a newer version of bond (protocol %d): update this device", wire.Version)
+		aad = dirReplyV1
+	case req.Proto > wire.Version:
+		reply.Error = fmt.Sprintf("the aggregator runs an older version of bond (protocol %d): update it first", wire.Version)
+	case !r.known(req.WGPublic) && tok.MaxUses > 0 && tok.Uses >= tok.MaxUses:
 		reply.Error = "this join code has been used up"
-	} else if mesh, node, err := r.admit(tok, req); err != nil {
-		reply.Error = err.Error()
-	} else {
-		reply.Mesh = mesh
-		cp := *node
-		joined = &cp
+	default:
+		if mesh, node, err := r.admit(tok, req); err != nil {
+			reply.Error = err.Error()
+		} else {
+			reply.Mesh = mesh
+			cp := *node
+			joined = &cp
+		}
 	}
 	secret := tok.Secret
 	r.mu.Unlock()
 
 	// From here the reply is sealed: only the holder of the code can read
-	// even the error.
+	// even the error, and only in answer to this request.
 	body, _ := json.Marshal(reply)
-	out, err := seal(secret, dirReply, body)
+	out, err := seal(secret, aad, body)
 	if err != nil {
 		return http.StatusInternalServerError, []byte("internal error\n")
 	}

@@ -27,7 +27,9 @@ type RelayOptions struct {
 	NoAdvertise bool
 	// Admin is the local address of the status API. Default "127.0.0.1:7780"; "-" disables.
 	Admin string
-	Log   *slog.Logger
+	// StateDir keeps the admin token.
+	StateDir string
+	Log      *slog.Logger
 }
 
 // RelayNode is a running relay.
@@ -108,7 +110,7 @@ func StartRelay(o RelayOptions) (_ *RelayNode, err error) {
 		}
 	}()
 	if o.Admin != "-" {
-		if n.admin, err = serveAdmin(o.Admin, n.adminRoutes(), o.Log); err != nil {
+		if n.admin, err = serveAdmin(o.Admin, o.StateDir, n.adminRoutes(), o.Log); err != nil {
 			return nil, err
 		}
 	}

@@ -31,7 +31,7 @@ paths underneath come and go.
 
 | Field | |
 |---|---|
-| `ver`/`type` | version 1; DATA (a WireGuard datagram), PROBE (feedback), HELLO (path announcement) |
+| `ver`/`type` | version 2; DATA (a WireGuard datagram), PROBE (feedback), HELLO (path announcement) |
 | `pathID` | chosen by the hub; the aggregator echoes it |
 | `flags` | direction (hub→aggregator or back); whether other copies of this datagram were sent |
 | `class` | bulk, realtime, control |
@@ -39,7 +39,7 @@ paths underneath come and go.
 | `path seq` | counts every datagram sent on this path: loss and liveness are measured against it |
 | `global seq` | counts data datagrams across all paths: reordering and duplicate removal use it |
 | `send ts` | sender's clock in ms, echoed back to measure round trips |
-| `tag` | SipHash-2-4 over the entire datagram, keyed by a per-session key from the join |
+| `tag` | SipHash-2-4 over the entire datagram, keyed by the session's key from the join bound to the sender's generation (below) |
 
 The header is not secret (it is comparable to what QUIC leaves visible) but it
 is authenticated, payload included. Without the tag, anyone who could inject a
@@ -47,6 +47,15 @@ packet could move a path to their own address, mark sequence numbers as
 already seen, or forge the feedback that scheduling relies on. The direction
 bit is covered by the tag so a party's own datagrams cannot be bounced back at
 it.
+
+The key is not the session key itself but one derived from it for each run of
+the sending process: two SipHash outputs under the session key, of
+`bondgen0` and `bondgen1` each followed by the run's generation (see
+[Restarts](#restarts)). A datagram recorded during one run carries a tag no
+later run accepts. Version 1 tagged with the session key directly, which let a
+single recorded datagram, replayed after either end restarted, take a path
+over. Version 1 and 2 devices cannot talk to each other; an aggregator logs it
+when one tries.
 
 Tunnel MTU is 1280: 1280 + 32 (WireGuard) + 28 (bond) + 48 (IPv6/UDP) = 1388,
 which fits any path that carries 1500-byte packets with room for PPPoE,
@@ -110,23 +119,37 @@ Counters are cumulative so a lost probe costs nothing.
 ### A path that comes back
 
 An uplink that goes away and returns — a tether replugged, a phone changing
-access point — gets a new socket, and its sequence numbers start again, but
-the hub may well give it the same path id. To the aggregator those datagrams
-would look like old traffic arriving late and be ignored. So each HELLO also
-carries an *instance* number, higher for every path the hub opens. A higher
-instance on a known id tells the aggregator this is a new path: it forgets the
-old one's sequence numbers, takes the new address, and makes it prove itself
-with a round trip like any other. A lower or equal instance is a replay.
+access point — gets a new socket, and the hub may well give it the same path
+id. Its sequence numbers carry on from where the last path with that id left
+off, never starting again within a run, so nothing the old socket sent can
+pass for new. Each HELLO also carries an *instance* number, higher for every
+path the hub opens. A higher instance on a known id tells the aggregator this
+is a new path: it forgets what the far end had counted, takes the new address
+from the first datagram that advances the sequence, and makes the path prove
+itself with a round trip like any other. A HELLO of a lower instance is old
+traffic, and dropped. The aggregator numbers its own paths the same way, so a
+path it forgot after a minute's silence and makes again carries on too.
 
 ### Restarts
 
 Each process has a *generation* number, larger on every start (taken from the
 clock, and from a file so that it still increases on a machine whose clock went
-backwards). HELLO carries it. When an end sees a higher generation from its
-peer it forgets the peer's sequence numbers, marks every path down until it
-proves itself again, and — on a hub — tells WireGuard to handshake at once
-rather than after its fifteen-second dead-peer timer. Recovery from an
-aggregator restart takes about a second.
+backwards; a phone, which has no such file, keeps it in its config, and the
+app stores that before every start). HELLO carries it, and is tagged under the
+key of the generation it names. Anything else is accepted only under the key
+of the generation adopted from the peer's HELLOs, so an end that has just
+started takes nothing but a HELLO, and a HELLO naming an older generation
+than one already adopted is dropped. When an end sees a higher generation from
+its peer it forgets the peer's sequence numbers, marks every path down until
+it proves itself again, and — on a hub — tells WireGuard to handshake at once
+rather than after its fifteen-second dead-peer timer. A hub announces a path
+again every 200 ms whenever it goes down, until the aggregator answers, so an
+aggregator that has restarted learns its generation within a moment of
+noticing. Recovery from an aggregator restart takes about a second.
+
+Only the newest datagram on a path counts as a sign of life, may move the
+path, or has its feedback digested: the counters are cumulative, so an older
+report says nothing new, and a replayed one could only skew the estimates.
 
 ## Scheduling
 
@@ -211,8 +234,17 @@ encrypted (XChaCha20-Poly1305) under a key derived from it; the reply is
 encrypted the same way, with the direction bound in. The device learns the
 aggregator's WireGuard key, its own address, and its session id and key. The
 token itself never crosses the network. An eavesdropper learns nothing; an
-impostor cannot produce a reply the device will accept. The exchange runs over
-plain HTTP on the aggregator's TCP port.
+impostor cannot produce a reply the device will accept, and the reply is
+bound to the request it answers (its nonce is in the reply's additional data),
+so one recorded on its way to one device is no use to another. The request
+names the protocol version the device speaks; a device or aggregator on the
+other version is told, in a reply it can read, to update. The exchange runs
+over plain HTTP on the aggregator's TCP port, which accepts at most 64
+connections from one address and 2048 in all, and gives a request 15 seconds
+to arrive.
+
+The standing join code works until it is replaced (`bond code --rotate`);
+removing a device does not stop it joining again with a code it still holds.
 
 A device that joins again with the same WireGuard key keeps its identity.
 
@@ -269,7 +301,7 @@ Each datagram crosses it in a frame:
 |---|---|
 | `type` | data, ping or pong: 0xB1–0xB3. A bond datagram has its version in those four bits, so the two share a port |
 | `link` | which aggregator's link, from the welcome |
-| `handle` | the rendezvous's number for one hub socket: a UDP address and port, or a WebSocket connection. It tells the aggregator each new one on the control connection |
+| `handle` | the rendezvous's number for one hub socket: a UDP address and port, or a WebSocket connection |
 | `link seq` | counts frames each way |
 | `tag` | SipHash-2-4 over the frame, keyed by the link key |
 
@@ -282,13 +314,19 @@ on.
 To the aggregator a handle is a remote like any other, and a path through the
 rendezvous moves between handles by the usual rule: only a datagram that
 verifies and advances the path sequence moves it. A rendezvous that misroutes
-can break a path but not redirect one. A full 1340-byte datagram is 1409
+can break a path but not redirect one. The first such datagram from a handle
+also makes the aggregator *confirm* it on the control connection; the
+rendezvous answers with the address it sees the hub socket at. A full 1340-byte datagram is 1409
 bytes on the link with IPv6 and UDP headers.
 
 **What the rendezvous refuses:** datagrams that do not parse as travelling from
 a hub to an aggregator, or whose session nobody registered; frames that fail
 their tag; replies that are not going from an aggregator to a hub, or are for
 a handle silent for a minute; more than 1024 hub sockets for one aggregator.
+It cannot check a datagram's tag, so anyone who knows a session id can make
+hub sockets, from as many addresses as they can send from. A socket the
+aggregator has not confirmed is forgotten after ten seconds' silence, and
+makes way for a newcomer when the 1024 are taken; confirmed ones never do.
 It has no session keys, so it routes on the session id alone. A session id
 another aggregator registered first stays with that one; the late aggregator
 is told and logs it, and that device would have to join again to get another
@@ -306,11 +344,13 @@ routes IPv6 into the tunnel, where it is dropped.
 
 ## Known limits
 
-- **Replay across restarts.** Session keys outlive a process, so a datagram
-  recorded during an earlier run still carries a valid tag. The round-trip
-  rule stops replays from raising paths within a run; across a restart, a
-  replayed datagram can occupy a path slot on the aggregator for ten seconds.
-  It can cause no traffic to be sent anywhere new and nothing to be decrypted.
+- **Replay within a run.** A datagram replayed during the run that sent it
+  verifies, but is never the newest on its path once a newer one has
+  arrived, so it moves nothing. Against an aggregator that has just started,
+  a replayed HELLO of the hub's current run can make a path, pointing at the
+  replayer, until the hub's own next datagram on it — at most a quarter of a
+  second — takes it back; never sent a round trip, it is forgotten in ten
+  seconds.
 - **Reverse-direction congestion.** Round-trip time cannot tell which direction
   is slow. A saturated download inflates the cost of the same path for
   uploads. One-way delay measurement would fix it.

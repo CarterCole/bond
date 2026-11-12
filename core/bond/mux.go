@@ -6,6 +6,7 @@ package bond
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -116,7 +117,9 @@ type Mux struct {
 	stopOnce sync.Once
 	wg       sync.WaitGroup
 
-	RxUnknown atomic.Uint64 // datagrams for no session, wrong direction or bad tag
+	RxUnknown atomic.Uint64 // datagrams for no session, wrong direction, bad tag or an earlier run of the peer
+
+	warnedOld atomic.Bool // said once that a peer speaks an older protocol
 }
 
 func New(opt Options) *Mux {
@@ -175,12 +178,14 @@ func (m *Mux) run() {
 // AddSession registers a hub↔aggregator session. Both ends must use the same
 // id and key.
 func (m *Mux) AddSession(id uint32, key [16]byte, name string) *Session {
+	k := wire.NewKey(key)
 	s := &Session{
-		m:    m,
-		ID:   id,
-		Name: name,
-		key:  wire.NewKey(key),
-		ro:   reorder.New[*path.Buf](m.opt.Window, m.opt.MinHold),
+		m:     m,
+		ID:    id,
+		Name:  name,
+		key:   k,
+		txKey: k.Bind(m.opt.Gen),
+		ro:    reorder.New[*path.Buf](m.opt.Window, m.opt.MinHold),
 	}
 	s.ep = &Endpoint{m: m, id: id}
 	if m.opt.Role == Server {
@@ -251,9 +256,14 @@ type Session struct {
 	m    *Mux
 	ID   uint32
 	Name string
-	key  wire.Key
-	ep   *Endpoint
-	dir  uint8
+	key  wire.Key // the session key; only ever used bound to a generation
+	// txKey tags what this run sends. rx is the key of the peer's run this
+	// end has adopted from its hello, nil until there is one: nothing but a
+	// hello is accepted before then.
+	txKey wire.Key
+	rx    atomic.Pointer[peerKey]
+	ep    *Endpoint
+	dir   uint8
 	// Classes tells the session which class the next WireGuard datagrams
 	// belong to; see ClassQueue.
 	Classes ClassQueue
@@ -271,7 +281,11 @@ type Session struct {
 
 	lastRealtime int64
 	nextInst     uint32
-	stash        []stashed
+	// txNext is where each path id's sequence numbers carry on from. A path
+	// reopened under an id continues its predecessor's numbering rather than
+	// starting again, so nothing the old one sent can pass for new.
+	txNext [256]uint32
+	stash  []stashed
 	// holdExtra widens the reorder hold after datagrams arrive that had
 	// already been given up on; it decays while that stops happening.
 	holdExtra time.Duration
@@ -289,6 +303,12 @@ type Session struct {
 type stashed struct {
 	payload []byte
 	at      int64
+}
+
+// peerKey is the run of the peer that this end accepts datagrams from.
+type peerKey struct {
+	gen uint64
+	key wire.Key
 }
 
 type outPkt struct {
@@ -346,6 +366,7 @@ func (s *Session) AddPath(id uint8, name, kind string, policy sched.Policy, remo
 func (s *Session) addLocked(id uint8, name, kind string, policy sched.Policy, remote path.Remote, now int64) *Path {
 	p := &Path{ID: id, Name: name, Kind: kind, remote: remote, created: now, rateAt: now}
 	p.Policy = policy
+	p.TxSeq = s.txNext[id]
 	s.byID[id] = p
 	s.paths = append(s.paths, p)
 	s.states = append(s.states, &p.State)
@@ -354,6 +375,7 @@ func (s *Session) addLocked(id uint8, name, kind string, policy sched.Policy, re
 
 func (s *Session) removeLocked(p *Path) {
 	s.byID[p.ID] = nil
+	s.txNext[p.ID] = p.TxSeq
 	for i, q := range s.paths {
 		if q == p {
 			s.paths = append(s.paths[:i], s.paths[i+1:]...)
@@ -455,7 +477,7 @@ func (s *Session) Send(payload []byte, class wire.Class) {
 		h.PathID = p.ID
 		h.PathSeq = p.OnSend(b.N, now)
 		h.Put(b.B[:])
-		wire.Seal(&s.key, b.B[:b.N])
+		wire.Seal(&s.txKey, b.B[:b.N])
 		if p.awaitSince == 0 {
 			p.awaitSince = now
 		}
@@ -517,7 +539,7 @@ func (s *Session) buildCtl(p *Path, typ wire.Type, payload []byte, now int64) ou
 	h := wire.Header{Type: typ, PathID: p.ID, Flags: s.dir, Class: wire.ClassControl, Session: s.ID, SendTS: ms(now)}
 	h.PathSeq = p.OnSend(b.N, now)
 	h.Put(b.B[:])
-	wire.Seal(&s.key, b.B[:b.N])
+	wire.Seal(&s.txKey, b.B[:b.N])
 	return outPkt{p.remote, b, p}
 }
 
@@ -557,6 +579,9 @@ func (m *Mux) Receive(b *path.Buf, from path.Remote) {
 	pkt := b.Bytes()
 	h, err := wire.Parse(pkt)
 	if err != nil {
+		if errors.Is(err, wire.ErrVersion) && pkt[0]>>4 == wire.Version1 && !m.warnedOld.Swap(true) {
+			m.opt.Log.Warn("a device is running an older version of bond (protocol 1) and cannot connect: update every device in the mesh", "from", from.String())
+		}
 		path.Put(b)
 		m.RxUnknown.Add(1)
 		return
@@ -567,7 +592,28 @@ func (m *Mux) Receive(b *path.Buf, from path.Remote) {
 		m.RxUnknown.Add(1)
 		return
 	}
-	if !wire.Verify(&s.key, pkt) {
+	// The key depends on which run of the peer sent the datagram. A hello
+	// says which itself; anything else must come from the run this end has
+	// adopted, and before there is one only a hello can be accepted.
+	var hello helloMsg
+	var gen uint64
+	var key wire.Key
+	switch rk := s.rx.Load(); {
+	case h.Type == wire.TypeHello:
+		if json.Unmarshal(pkt[wire.HeaderLen:], &hello) != nil || hello.Gen == 0 {
+			path.Put(b)
+			m.RxUnknown.Add(1)
+			return
+		}
+		gen, key = hello.Gen, s.key.Bind(hello.Gen)
+	case rk != nil:
+		gen, key = rk.gen, rk.key
+	default:
+		path.Put(b)
+		m.RxUnknown.Add(1)
+		return
+	}
+	if !wire.Verify(&key, pkt) {
 		path.Put(b)
 		s.rxBadTag.Add(1)
 		m.RxUnknown.Add(1)
@@ -581,9 +627,12 @@ func (m *Mux) Receive(b *path.Buf, from path.Remote) {
 	kept := false
 
 	s.mu.Lock()
-	if s.dead {
+	// Genuine, but from a run of the peer that has since been replaced: a
+	// replay, or a datagram that sat in a queue across a restart.
+	if s.dead || gen < s.peerGen || (h.Type != wire.TypeHello && gen != s.peerGen) {
 		s.mu.Unlock()
 		path.Put(b)
+		m.RxUnknown.Add(1)
 		return
 	}
 	p := s.byID[h.PathID]
@@ -594,17 +643,25 @@ func (m *Mux) Receive(b *path.Buf, from path.Remote) {
 			return
 		}
 		p = s.addLocked(h.PathID, fmt.Sprintf("path%d", h.PathID), "", sched.PolicyBonded, from, now)
-		// Tell the hub which generation of the aggregator it is talking to.
-		out = append(out, s.buildHello(p, now))
+		if h.Type != wire.TypeHello {
+			// Tell the hub which generation of the aggregator it is talking
+			// to. (A hello gets its answer below.)
+			out = append(out, s.buildHello(p, now))
+		}
 	}
 	// A hello that announces a restarted peer wipes what we knew about its
 	// sequence numbers. Do that before accounting for the hello itself, so
 	// that it is the first thing recorded in the fresh state and can be
 	// echoed straight back.
-	var hello helloMsg
 	bumped := false
 	if h.Type == wire.TypeHello {
-		hello, bumped = s.readHello(p, pkt[wire.HeaderLen:], now)
+		var current bool
+		if bumped, current = s.readHello(p, &hello, now); !current {
+			s.mu.Unlock()
+			path.Put(b)
+			m.RxUnknown.Add(1)
+			return
+		}
 	}
 	newest := p.OnRecv(&h, len(pkt), now) || bumped
 	if newest {
@@ -619,7 +676,13 @@ func (m *Mux) Receive(b *path.Buf, from path.Remote) {
 		kept = ok
 		s.releaseLocked(res, now)
 	case wire.TypeProbe:
-		if fb, err := wire.ParseFeedback(pkt[wire.HeaderLen:]); err == nil {
+		// Only the newest report counts: the counters are cumulative, so an
+		// older one says nothing new, and a replayed one would skew the
+		// round trip.
+		if fb, err := wire.ParseFeedback(pkt[wire.HeaderLen:]); err == nil && newest {
+			if fb.EchoDelay != wire.NoEcho && int32(fb.EchoTS-ms(p.created)) < 0 {
+				fb.EchoDelay = wire.NoEcho // an echo of something sent before this path existed
+			}
 			p.OnFeedback(&fb, now, ms(now), &m.opt.Sched)
 			// A path only comes up on a round trip: the peer must echo
 			// something we sent since the path was created or last died.
@@ -634,7 +697,7 @@ func (m *Mux) Receive(b *path.Buf, from path.Remote) {
 			}
 		}
 	case wire.TypeHello:
-		if hello.Gen != 0 && newest {
+		if newest {
 			s.onHello(p, &hello, now, &out)
 		}
 	}
@@ -644,6 +707,13 @@ func (m *Mux) Receive(b *path.Buf, from path.Remote) {
 			m.opt.Log.Info("path roamed", "session", s.Name, "path", p.Name, "to", from.String())
 		}
 		p.remote = from
+	}
+	if newest {
+		// Tell a transport that cares (a rendezvous) that this source is
+		// carrying genuine, current traffic.
+		if c, ok := from.S.(interface{ Confirm() }); ok {
+			c.Confirm()
+		}
 	}
 	since := now - p.LastFbTx
 	if p.LastFbTx == 0 {
@@ -671,22 +741,25 @@ func (m *Mux) Receive(b *path.Buf, from path.Remote) {
 	}
 }
 
-// readHello decodes a path announcement and, if it shows that the peer has
-// restarted (or is being heard from for the first time), forgets everything
-// derived from the peer's old sequence numbers. A hello from before the
-// peer's last restart is a replay and comes back as the zero message.
-func (s *Session) readHello(p *Path, payload []byte, now int64) (hm helloMsg, bumped bool) {
-	if json.Unmarshal(payload, &hm) != nil || hm.Gen == 0 || hm.Gen < s.peerGen {
-		return helloMsg{}, false
-	}
+// readHello applies a path announcement whose tag has been checked and whose
+// generation is not older than the one adopted. If it shows that the peer has
+// restarted (or is being heard from for the first time), it forgets
+// everything derived from the peer's old sequence numbers and adopts the new
+// run's key. current is false for an announcement of an earlier incarnation
+// of the path, which is old traffic.
+func (s *Session) readHello(p *Path, hm *helloMsg, now int64) (bumped, current bool) {
 	if hm.Gen == s.peerGen {
 		// Same process at the far end. But is it the same path? A higher
 		// instance number means the hub closed this path and opened a new
-		// one under the same id: forget the old one's sequence numbers and
-		// make the new one prove itself. (Lower or equal is old traffic.)
-		if hm.Inst > p.peerInst {
+		// one under the same id. Its sequence numbers carry on from the old
+		// one's, so what is known of them stands; the far end's counters
+		// are new, and the path has to prove itself again.
+		switch {
+		case hm.Inst < p.peerInst:
+			return false, false
+		case hm.Inst > p.peerInst:
 			if p.peerInst != 0 {
-				p.ResetPeer()
+				p.ResetFeedback()
 				if p.Up {
 					p.Up = false
 					p.wentDown = now
@@ -695,7 +768,7 @@ func (s *Session) readHello(p *Path, payload []byte, now int64) (hm helloMsg, bu
 			}
 			p.peerInst = hm.Inst
 		}
-		return hm, bumped
+		return bumped, true
 	}
 	if s.peerGen != 0 {
 		s.m.opt.Log.Info("peer restarted", "session", s.Name)
@@ -720,8 +793,9 @@ func (s *Session) readHello(p *Path, payload []byte, now int64) (hm helloMsg, bu
 		path.Put(b)
 	}
 	s.peerGen = hm.Gen
+	s.rx.Store(&peerKey{gen: hm.Gen, key: s.key.Bind(hm.Gen)})
 	p.peerInst = hm.Inst
-	return hm, true
+	return true, true
 }
 
 // onHello applies a path announcement that is current (not a replay).
@@ -825,6 +899,10 @@ func (s *Session) tick(now int64) {
 			if silent > s.downAfter(p, now) {
 				p.Up = false
 				p.wentDown = now
+				// Announce the path again, promptly, until the far end
+				// answers: if it has restarted, nothing but a hello can tell
+				// it which run of this end to accept datagrams from.
+				p.helloAcked = false
 				events = append(events, struct {
 					st PathStatus
 					ev string

@@ -85,7 +85,8 @@ class Bond < Formula
     assert_match version.to_s, shell_output("#{bin}/bondd version")
 
     # A userspace aggregator needs no root: start one and ask it for its
-    # join code through the status API, as an operator would.
+    # join code through the status API, as an operator would. Showing the
+    # code needs the admin token, which bond finds in the state directory.
     admin = "127.0.0.1:#{free_port}"
     pid = spawn bin/"bondd", "server", "--userspace", "--no-upnp",
                 "--listen", "127.0.0.1:#{free_port}", "--public", "127.0.0.1",
@@ -94,7 +95,7 @@ class Bond < Formula
       code = nil
       20.times do
         sleep 0.5
-        code = Utils.popen_read(bin/"bond", "--admin", admin, "code")
+        code = Utils.popen_read(bin/"bond", "--admin", admin, "--state", testpath/"state", "code")
         break if code.include?("bond://")
       end
       assert_match "bond://", code

@@ -1,7 +1,10 @@
 package control
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -268,5 +271,120 @@ func TestNextGenNeverGoesBackwards(t *testing.T) {
 	c := NextGen(dir)
 	if !(a < b && b < c) {
 		t.Fatalf("generations not increasing: %d %d %d", a, b, c)
+	}
+}
+
+// recordingTransport keeps the last response body it carried.
+type recordingTransport struct{ last []byte }
+
+func (r *recordingTransport) RoundTrip(q *http.Request) (*http.Response, error) {
+	resp, err := http.DefaultTransport.RoundTrip(q)
+	if err == nil {
+		r.last, _ = io.ReadAll(resp.Body)
+		resp.Body = io.NopCloser(bytes.NewReader(r.last))
+	}
+	return resp, err
+}
+
+// replying serves body to every request: something on the path answering
+// in place of the aggregator.
+func replying(t *testing.T, code JoinCode, body []byte) JoinCode {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+	h, p, _ := splitHostPort(strings.TrimPrefix(srv.URL, "http://"))
+	code.Host, code.Port = h, p
+	return code
+}
+
+// A reply recorded on its way to one device must not be accepted by
+// another device joining with the same code: it would get the first one's
+// address and session key.
+func TestJoinReplyIsBoundToItsRequest(t *testing.T) {
+	reg, _ := serve(t)
+	code, _ := reg.StandingCode()
+	_, pubA := newKeyPair(t)
+	_, pubB := newKeyPair(t)
+	rec := &recordingTransport{}
+	if _, err := Join(context.Background(), code, JoinRequest{Name: "A", Kind: KindHub, WGPublic: pubA}, &http.Client{Transport: rec}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Join(context.Background(), replying(t, code, rec.last), JoinRequest{Name: "B", Kind: KindHub, WGPublic: pubB}, nil)
+	if err == nil || !strings.Contains(err.Error(), "not an answer to this request") {
+		t.Fatalf("a replayed reply was accepted, or refused for the wrong reason: %v", err)
+	}
+}
+
+// Devices and aggregators on different protocol versions say so, in a
+// reply the older side can read.
+func TestJoinAcrossProtocolVersions(t *testing.T) {
+	reg, srv := serve(t)
+	code, _ := reg.StandingCode()
+	_, pub := newKeyPair(t)
+
+	// A version 1 device: no proto in the request, a version 1 reply.
+	body, _ := json.Marshal(JoinRequest{Name: "old", Kind: KindHub, WGPublic: pub})
+	env, _ := seal(code.Token[:], dirRequest, body)
+	raw, _ := json.Marshal(env)
+	resp, err := http.Post(srv.URL+"/v1/join", "application/json", bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var renv envelope
+	json.NewDecoder(resp.Body).Decode(&renv)
+	pt, err := open(code.Token[:], dirReplyV1, renv)
+	if err != nil || !strings.Contains(string(pt), "update this device") {
+		t.Fatalf("a version 1 device could not read why it was refused: %v %s", err, pt)
+	}
+	if len(reg.Nodes()) != 0 {
+		t.Fatal("a version 1 device was admitted")
+	}
+
+	// A version 1 aggregator: this device is told to update it.
+	old, _ := seal(code.Token[:], dirReplyV1, []byte(`{"mesh":{"id":"m"}}`))
+	oldRaw, _ := json.Marshal(old)
+	_, err = Join(context.Background(), replying(t, code, oldRaw), JoinRequest{Name: "n", Kind: KindHub, WGPublic: pub}, nil)
+	if err == nil || !strings.Contains(err.Error(), "older version") {
+		t.Fatalf("a version 1 aggregator's reply: %v", err)
+	}
+}
+
+// Rotating the standing code is what stops a removed device from joining
+// again with the code it had.
+func TestRotateStandingCode(t *testing.T) {
+	reg, _ := serve(t)
+	old, _ := reg.StandingCode()
+	_, pub := newKeyPair(t)
+	if _, err := Join(context.Background(), old, JoinRequest{Name: "a", Kind: KindHub, WGPublic: pub}, nil); err != nil {
+		t.Fatal(err)
+	}
+	changed := 0
+	reg.OnChange = func() { changed++ }
+	fresh, err := reg.RotateStanding()
+	if err != nil || fresh.Token == old.Token || changed == 0 {
+		t.Fatalf("rotate: %v, new token %v, told the rendezvous %d times", err, fresh.Token != old.Token, changed)
+	}
+	if again, _ := reg.StandingCode(); again.Token != fresh.Token {
+		t.Fatal("standing code is not the rotated one")
+	}
+	_, pub2 := newKeyPair(t)
+	if _, err := Join(context.Background(), old, JoinRequest{Name: "b", Kind: KindHub, WGPublic: pub2}, nil); err == nil {
+		t.Fatal("the replaced standing code still admits devices")
+	}
+	if _, err := Join(context.Background(), fresh, JoinRequest{Name: "b", Kind: KindHub, WGPublic: pub2}, nil); err != nil {
+		t.Fatal(err)
+	}
+	var standing int
+	for _, ti := range reg.Tokens() {
+		if ti.Standing {
+			standing++
+		}
+	}
+	if standing != 1 || len(reg.Nodes()) != 2 {
+		t.Fatalf("%d standing codes, %d nodes", standing, len(reg.Nodes()))
 	}
 }

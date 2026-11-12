@@ -80,6 +80,39 @@ const tile = (v, label) => h("div", { class: "tile" }, h("b", {}, v), h("span", 
 const stat = (v, label) => h("div", {}, v, h("small", {}, label));
 const $ = id => document.getElementById(id);
 
+// The admin token, which showing codes and every change need, comes in the
+// address `bond dashboard` prints, after the #, which a browser never sends
+// anywhere. It is kept for this address and sent with every request.
+const TOKEN_KEY = "bond-admin-token";
+let token = null, admin = false;
+try { token = localStorage.getItem(TOKEN_KEY); } catch (e) {}
+function takeToken() {
+  const m = /(?:^#|&)token=([0-9a-f]+)/.exec(location.hash);
+  if (!m) return false;
+  token = m[1];
+  try { localStorage.setItem(TOKEN_KEY, token); } catch (e) {}
+  history.replaceState(null, "", location.pathname);
+  return true;
+}
+takeToken();
+// Pasted into a tab that already shows the dashboard: no reload happens.
+window.addEventListener("hashchange", () => { if (takeToken()) refresh(); });
+async function api(path, init = {}) {
+  const headers = Object.assign({}, init.headers);
+  if (token) headers.Authorization = "Bearer " + token;
+  const r = await fetch(path, Object.assign({ cache: "no-store" }, init, { headers }));
+  if (r.status === 401 && token && !init.retried) {
+    // A token from before the daemon's state was reset: carry on read-only.
+    token = null;
+    try { localStorage.removeItem(TOKEN_KEY); } catch (e) {}
+    return api(path, Object.assign({}, init, { retried: true }));
+  }
+  admin = r.headers.get("X-Bond-Admin") === "1";
+  return r;
+}
+const readOnly = () => h("p", { class: "sub" }, "Read-only. To make changes, run ", h("code", {}, "bond dashboard"),
+  " on this machine (with sudo if bondd runs as a service) and open the address it prints.");
+
 // morph updates the live tree to look like a freshly rendered one, in place.
 // Elements keep their identity from one refresh to the next, so nothing
 // flickers, an open menu stays open, and half-typed text stays typed.
@@ -104,7 +137,7 @@ function morph(from, to) {
 
 async function post(path, body) {
   $("err").textContent = "";
-  const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const r = await api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) { $("err").textContent = j.error || ("request failed: " + r.status); return null; }
   if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
@@ -144,7 +177,13 @@ function prioritySection(s) {
     return h("span", { class: "row" }, input, h("button", { onclick: e => add(e.target.previousElementSibling) }, "Add"));
   };
   const chips = (list, key) => h("div", { class: "chips" }, list.map((v, i) =>
-    h("span", { class: "chip" }, v, h("button", { title: "remove", onclick: () => save({ [key]: list.filter((_, j) => j !== i) }) }, "×"))));
+    h("span", { class: "chip" }, v, admin ? h("button", { title: "remove", onclick: () => save({ [key]: list.filter((_, j) => j !== i) }) }, "×") : null)));
+  if (!admin) {
+    return h("div", { class: "card" },
+      h("p", {}, pr.all ? "Everything this device sends is priority." : "Priority traffic:"),
+      chips(devices, "devices"), chips(ports, "ports"),
+      h("p", { class: "sub" }, s.realtime_packets.toLocaleString() + " priority packets so far"), readOnly());
+  }
   return h("div", { class: "card" },
     h("label", { class: "check" },
       h("input", { type: "checkbox", checked: !!pr.all, onchange: e => save({ all: e.target.checked }) }),
@@ -170,7 +209,7 @@ function renderHub(s) {
       tile(dur(s.uptime_sec), "uptime")),
     s.socks5 ? h("p", { class: "sub" }, "No-root mode: send traffic through the SOCKS5 proxy at ", h("code", {}, s.socks5)) : null,
     h("h2", {}, "Paths"),
-    paths.length ? paths.map(p => pathCard(p, max, true)) : h("div", { class: "card sub" }, "No uplinks found yet."),
+    paths.length ? paths.map(p => pathCard(p, max, admin)) : h("div", { class: "card sub" }, "No uplinks found yet."),
     h("h2", {}, "Priority"), prioritySection(s),
   ];
 }
@@ -185,12 +224,15 @@ function renderServer(s) {
     s.port_map ? h("p", { class: "sub" }, "Router: " + s.port_map.note) : null,
     s.via ? h("p", { class: "sub" }, "Rendezvous: " + viaText(s.via)) : null,
     h("h2", {}, "Add a device"),
-    h("div", { class: "card row" },
-      h("img", { class: "qr", src: "/api/qr.svg", alt: "join code as a QR code" }),
+    s.join_code ? h("div", { class: "card row" },
+      h("img", { class: "qr", src: s.join_qr, alt: "join code as a QR code" }),
       h("div", { class: "grow" },
         h("p", {}, "Scan with the Bond app, or run on the device:"),
         h("p", {}, h("code", {}, "bondd hub --join " + s.join_code)),
-        h("p", { class: "sub" }, "Anyone with this code can join the mesh. Treat it like a password."))),
+        h("p", { class: "sub" }, "Anyone with this code can join the mesh. Treat it like a password. ",
+          "Removing a device only sticks once it no longer has a working code: ",
+          h("button", { onclick: () => { if (confirm("Replace the join code? The current one stops working; devices that joined with it stay.")) post("/api/code/rotate", {}); } }, "Replace this code"))))
+      : h("div", { class: "card" }, h("p", {}, "The join code is shown to the admin only."), readOnly()),
     h("h2", {}, "Devices"),
     nodes.length ? nodes.map(n => {
       const paths = (n.session && n.session.paths) || [];
@@ -200,7 +242,7 @@ function renderServer(s) {
           h("span", { class: "dot" + (n.online ? " up" : "") }),
           h("div", { class: "grow" }, h("span", { class: "name" }, n.name), " ",
             h("span", { class: "sub" }, n.kind + (n.platform ? " · " + n.platform : "") + " · " + n.ip)),
-          h("button", { onclick: () => { if (confirm("Remove " + n.name + " from the mesh?")) post("/api/kick", { id: n.id }); } }, "Remove")),
+          admin ? h("button", { onclick: () => { if (confirm("Remove " + n.name + " from the mesh?")) post("/api/kick", { id: n.id }); } }, "Remove") : null),
         paths.map(p => pathCard(p, max, false)));
     }) : h("div", { class: "card sub" }, "Nothing has joined yet."),
   ];
@@ -220,10 +262,11 @@ function renderRendezvous(s) {
       tile(String(aggs.length), "aggregators registered"), tile(bytes(r.up_bytes), "forwarded up"),
       tile(bytes(r.down_bytes), "forwarded down"), tile(dur(s.uptime_sec), "uptime")),
     h("h2", {}, "Register an aggregator"),
-    h("div", { class: "card" },
+    s.pairing_code ? h("div", { class: "card" },
       h("p", {}, "On a machine with no public address:"),
-      h("p", {}, h("code", {}, "bondd server --via " + s.pairing_code)),
-      h("p", { class: "sub" }, "Anyone with this code can register an aggregator here. Treat it like a password.")),
+      h("p", {}, h("code", {}, "sudo bondd service install server --via " + s.pairing_code)),
+      h("p", { class: "sub" }, "Anyone with this code can register an aggregator here. Treat it like a password."))
+      : h("div", { class: "card" }, h("p", {}, "The pairing code is shown to the admin only."), readOnly()),
     h("h2", {}, "Aggregators"),
     aggs.length ? aggs.map(a => h("div", { class: "card row" },
       h("span", { class: "dot" + (a.link ? " up" : "") }),
@@ -244,7 +287,7 @@ function renderRelay(s) {
 
 async function refresh() {
   try {
-    const s = await (await fetch("/api/status", { cache: "no-store" })).json();
+    const s = await (await api("/api/status")).json();
     const state = $("state");
     const ok = s.role === "hub" ? s.connected : true;
     state.textContent = s.role === "hub" ? (s.connected ? "connected" : "not connected") : s.role;

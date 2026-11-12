@@ -97,10 +97,18 @@ type rig struct {
 }
 
 // start runs a rendezvous and an aggregator end registered with it whose
-// handler answers every datagram with "re:" + its payload.
+// handler answers every datagram with "re:" + its payload, and confirms the
+// source as the bond does a datagram that verifies.
 func start(t *testing.T, sessions []uint32, tokens []string, join func([]byte) (int, []byte)) *rig {
+	return startWith(t, Options{}, sessions, tokens, join, func(string) bool { return true })
+}
+
+// startWith is start with options for the rendezvous and a say in which
+// payloads count as genuine.
+func startWith(t *testing.T, o Options, sessions []uint32, tokens []string, join func([]byte) (int, []byte), genuine func(payload string) bool) *rig {
 	t.Helper()
-	srv, err := Start(Options{Listen: "127.0.0.1:0", Public: "127.0.0.1", StateDir: t.TempDir(), Log: quiet})
+	o.Listen, o.Public, o.StateDir, o.Log = "127.0.0.1:0", "127.0.0.1", t.TempDir(), quiet
+	srv, err := Start(o)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,6 +121,9 @@ func start(t *testing.T, sessions []uint32, tokens []string, join func([]byte) (
 			defer path.Put(b)
 			h, _ := wire.Parse(b.Bytes())
 			payload := string(b.Bytes()[wire.HeaderLen:])
+			if c, ok := from.S.(interface{ Confirm() }); ok && genuine(payload) {
+				c.Confirm()
+			}
 			r.got <- payload
 			from.Send(datagram(h.Session, true, "re:"+payload))
 		},
@@ -160,11 +171,12 @@ func TestForwardsBothWays(t *testing.T) {
 	if len(st.Aggregators) != 1 || st.Aggregators[0].Sources != 1 || st.Aggregators[0].Link == "" || st.UpBytes == 0 || st.DownBytes == 0 {
 		t.Fatalf("rendezvous status: %+v", st)
 	}
-	// The aggregator learns where the hub socket was seen from.
-	eventually(t, "source notice", func() bool { return r.cli.Status().Sources == 1 })
+	// The aggregator learns where the hub socket was seen from, once it has
+	// confirmed the socket's traffic.
 	r.cli.mu.Lock()
 	h := r.cli.cur.handle(1)
 	r.cli.mu.Unlock()
+	eventually(t, "source notice", func() bool { return r.cli.Status().Sources == 1 && h.addr.Load() != nil })
 	if h.String() != r.hub.LocalAddr().String() || h.Via() != r.srv.Code().HostPort() {
 		t.Fatalf("sender %q via %q", h.String(), h.Via())
 	}
@@ -250,5 +262,54 @@ func TestPairingSecretPersists(t *testing.T) {
 	defer b.Close()
 	if b.Code() != code || code.HostPort() != "rv.example.com:443" {
 		t.Fatalf("codes %s and %s", code, b.Code())
+	}
+}
+
+// Anyone who knows a session id can make sources, from as many addresses as
+// they have. They must not be able to crowd out hub sockets the aggregator
+// has confirmed.
+func TestUnconfirmedSourcesMakeWay(t *testing.T) {
+	r := startWith(t, Options{MaxSources: 2}, []uint32{42}, nil, nil, func(p string) bool { return strings.HasPrefix(p, "good") })
+	hub := func() *net.UDPConn {
+		c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { c.Close() })
+		return c
+	}
+	reaches := func(c *net.UDPConn, payload string) bool {
+		t.Helper()
+		c.WriteToUDPAddrPort(datagram(42, false, payload), r.addr)
+		select {
+		case p := <-r.got:
+			if p != payload {
+				t.Fatalf("aggregator got %q, want %q", p, payload)
+			}
+			return true
+		case <-time.After(500 * time.Millisecond):
+			return false
+		}
+	}
+	a, b, c, d := hub(), hub(), hub(), hub()
+	if !reaches(a, "good a") {
+		t.Fatal("a genuine hub socket was refused")
+	}
+	eventually(t, "a confirmed", func() bool { return r.cli.Status().Sources == 1 })
+	if !reaches(b, "junk b") || !reaches(c, "junk c") {
+		t.Fatal("an unconfirmed newcomer was refused while an unconfirmed source could make way")
+	}
+	if !reaches(a, "good a again") {
+		t.Fatal("the confirmed source was pushed out")
+	}
+	if !reaches(c, "good c") {
+		t.Fatal("c lost its place")
+	}
+	eventually(t, "c confirmed", func() bool { return r.cli.Status().Sources == 2 })
+	if reaches(d, "junk d") {
+		t.Fatal("a newcomer pushed out a confirmed source")
+	}
+	if r.srv.Status().Aggregators[0].Sources != 2 {
+		t.Fatalf("sources: %+v", r.srv.Status().Aggregators[0])
 	}
 }

@@ -164,6 +164,8 @@ func StartServer(o ServerOptions) (_ *Server, err error) {
 		return nil, fmt.Errorf("listening on tcp %s: %w", tcpAddr, err)
 	}
 	lns = append(lns, ln)
+	// Anyone can open these connections: bound how many.
+	ln = path.LimitListener(ln, path.MaxConns, path.MaxConnsPerIP)
 	var tlsLn net.Listener
 	if o.TLS != "" {
 		addr := tlsListenAddr(o.TLS)
@@ -171,6 +173,7 @@ func StartServer(o ServerOptions) (_ *Server, err error) {
 			return nil, fmt.Errorf("listening on tcp %s for TLS: %w", addr, err)
 		}
 		lns = append(lns, tlsLn)
+		tlsLn = path.LimitListener(tlsLn, path.MaxConns, path.MaxConnsPerIP)
 	}
 
 	ro := control.RegistryOptions{}
@@ -289,7 +292,7 @@ func StartServer(o ServerOptions) (_ *Server, err error) {
 		}
 		io.WriteString(w, "bond aggregator\n")
 	})
-	s.web = &http.Server{Handler: hm, ReadHeaderTimeout: 10 * time.Second}
+	s.web = &http.Server{Handler: hm, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: time.Minute, MaxHeaderBytes: 16 << 10}
 	go s.web.Serve(ln)
 	if tlsLn != nil {
 		go s.web.Serve(tlsLn)
@@ -314,7 +317,7 @@ func StartServer(o ServerOptions) (_ *Server, err error) {
 	}
 
 	if o.Admin != "-" {
-		if s.admin, err = serveAdmin(o.Admin, s.adminRoutes(), o.Log); err != nil {
+		if s.admin, err = serveAdmin(o.Admin, o.StateDir, s.adminRoutes(), o.Log); err != nil {
 			return nil, err
 		}
 	}
@@ -409,15 +412,19 @@ type NodeStatus struct {
 
 // ServerStatus is the aggregator's status document.
 type ServerStatus struct {
-	Role     string       `json:"role"`
-	Version  string       `json:"version"`
-	Mode     string       `json:"mode"`
-	MeshID   string       `json:"mesh_id"`
-	Network  string       `json:"network"`
-	Public   []string     `json:"public"`
-	JoinCode string       `json:"join_code"`
-	Uptime   int64        `json:"uptime_sec"`
-	Nodes    []NodeStatus `json:"nodes"`
+	Role    string   `json:"role"`
+	Version string   `json:"version"`
+	Mode    string   `json:"mode"`
+	MeshID  string   `json:"mesh_id"`
+	Network string   `json:"network"`
+	Public  []string `json:"public"`
+	// JoinCode is the standing join code. The status API leaves it out, and
+	// adds JoinQR, its QR code as a data: URL, only for the admin token.
+	JoinCode   string       `json:"join_code,omitempty"`
+	JoinCodeID string       `json:"join_code_id,omitempty"` // names the code without revealing it
+	JoinQR     string       `json:"join_qr,omitempty"`
+	Uptime     int64        `json:"uptime_sec"`
+	Nodes      []NodeStatus `json:"nodes"`
 	// PortMap is the router's port forward, when the aggregator is behind
 	// one and asked for it.
 	PortMap *portmap.Status `json:"port_map,omitempty"`
@@ -431,7 +438,7 @@ func (s *Server) Status() ServerStatus {
 		Network: s.reg.Network().String(), Public: s.reg.Public(), Uptime: int64(time.Since(s.started).Seconds()),
 	}
 	if code, err := s.reg.StandingCode(); err == nil {
-		st.JoinCode = code.String()
+		st.JoinCode, st.JoinCodeID = code.String(), code.ID()
 	}
 	if s.portmap != nil {
 		pm := s.portmap.Status()

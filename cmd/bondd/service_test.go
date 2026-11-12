@@ -91,3 +91,31 @@ func TestStableExeFollowsHomebrewUpgrades(t *testing.T) {
 		}
 	}
 }
+
+func TestRootOnly(t *testing.T) {
+	// The toolchain's own files are not root's on a developer's machine; a
+	// system binary is.
+	mine := filepath.Join(t.TempDir(), "bondd")
+	if err := os.WriteFile(mine, nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if os.Geteuid() != 0 && rootOnly(mine) == nil {
+		t.Fatalf("%s, in a directory this user owns, passed as root's alone", mine)
+	}
+	if err := rootOnly("/bin/sh"); err != nil {
+		t.Fatalf("/bin/sh: %v", err)
+	}
+	// A symlink in root's directories pointing into a user's is followed.
+	if os.Geteuid() == 0 {
+		link := filepath.Join("/tmp", "bond-rootonly-test")
+		os.Remove(link)
+		if err := os.Symlink(mine, link); err != nil {
+			t.Fatal(err)
+		}
+		defer os.Remove(link)
+		os.Chown(mine, 501, 20)
+		if rootOnly(link) == nil {
+			t.Fatal("a link to a user's file passed")
+		}
+	}
+}

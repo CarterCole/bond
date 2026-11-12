@@ -410,12 +410,21 @@ func (s *State) Healthy(now int64) bool {
 // ResetPeer forgets everything learned from or about the peer's counters.
 // Used when the peer announces that it restarted.
 func (s *State) ResetPeer() {
+	s.ResetFeedback()
+	s.rxAny, s.rxGlobalAny, s.RxPending = false, false, false
+	s.RxHighest, s.RxPkts, s.RxBytes, s.RxMaxGlobal = 0, 0, 0, 0
+}
+
+// ResetFeedback forgets what the peer has reported about this path, whose
+// counters at the far end have started again (the hub opened a new socket
+// under the same path id), while keeping what this end knows of the peer's
+// sequence numbers: those carry on, and forgetting them would let old
+// datagrams pass for new ones.
+func (s *State) ResetFeedback() {
 	// Nothing sent before the reset counts as in flight any more.
 	s.acked, s.AckedSeq, s.ackedBytes = true, s.TxSeq-1, s.TxBytes
 	s.fbInit, s.rateInit, s.lossInit = false, false, false
 	s.lossSent, s.lossRecv, s.lossySince = 0, 0, 0
-	s.rxAny, s.rxGlobalAny, s.RxPending = false, false, false
-	s.RxHighest, s.RxPkts, s.RxBytes, s.RxMaxGlobal = 0, 0, 0, 0
 }
 
 const (

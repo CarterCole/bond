@@ -54,7 +54,7 @@ func StartRendezvous(o RendezvousOptions) (_ *RendezvousNode, err error) {
 		return nil, err
 	}
 	if o.Admin != "-" {
-		if n.admin, err = serveAdmin(o.Admin, base(func() any { return n.Status() }), o.Log); err != nil {
+		if n.admin, err = serveAdmin(o.Admin, o.StateDir, n.adminRoutes(), o.Log); err != nil {
 			return nil, err
 		}
 	}
@@ -81,9 +81,10 @@ func (n *RendezvousNode) Close() {
 
 // RendezvousDoc is a rendezvous's status document.
 type RendezvousDoc struct {
-	Role        string                  `json:"role"`
-	Version     string                  `json:"version"`
-	PairingCode string                  `json:"pairing_code"`
+	Role    string `json:"role"`
+	Version string `json:"version"`
+	// PairingCode is left out of the status API without the admin token.
+	PairingCode string                  `json:"pairing_code,omitempty"`
 	Uptime      int64                   `json:"uptime_sec"`
 	Rendezvous  rendezvous.ServerStatus `json:"rendezvous"`
 }

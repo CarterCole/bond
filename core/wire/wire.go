@@ -8,10 +8,12 @@
 //	+------+--------+-------+-------+----------+----------+-----------+----------+---------+---------
 //
 // The tag is SipHash-2-4 over the whole datagram (tag field zeroed), keyed by
-// the per-session key handed out at join time. It authenticates the path
-// metadata so nobody off the session can move a path's address, poison the
-// reorder window or forge feedback. Confidentiality and integrity of user
-// traffic are WireGuard's job, one layer up.
+// the per-session key handed out at join time, bound to the generation of the
+// process that sent it (Key.Bind). It authenticates the path metadata so
+// nobody off the session can move a path's address, poison the reorder window
+// or forge feedback, and the binding keeps a datagram recorded before either
+// end restarted from being replayed into the new run. Confidentiality and
+// integrity of user traffic are WireGuard's job, one layer up.
 package wire
 
 import (
@@ -20,7 +22,10 @@ import (
 )
 
 const (
-	Version   = 1
+	// Version 2 binds tags to the sender's generation. Version 1 peers
+	// cannot talk to it, and are told so (Version1).
+	Version   = 2
+	Version1  = 1
 	HeaderLen = 28
 	tagOff    = 20
 	TagLen    = 8
@@ -75,6 +80,20 @@ type Key struct{ k0, k1 uint64 }
 
 func NewKey(b [16]byte) Key {
 	return Key{binary.LittleEndian.Uint64(b[0:8]), binary.LittleEndian.Uint64(b[8:16])}
+}
+
+// Bind derives the key that tags what one run of a process sends: the
+// session key bound to that run's generation. Generations only grow, so a
+// datagram recorded before either end restarted is tagged under a key the
+// new run never accepts, and cannot be replayed into it. SipHash is a PRF;
+// two outputs under the session key make the 128-bit derived key.
+func (k Key) Bind(gen uint64) Key {
+	var m [16]byte
+	copy(m[:8], "bondgen0")
+	binary.LittleEndian.PutUint64(m[8:], gen)
+	k0 := sipHash24(k.k0, k.k1, m[:])
+	m[7] = '1'
+	return Key{k0, sipHash24(k.k0, k.k1, m[:])}
 }
 
 var (

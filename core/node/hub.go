@@ -17,7 +17,6 @@ import (
 
 	"github.com/CarterCole/bond/core/bond"
 	"github.com/CarterCole/bond/core/classify"
-	"github.com/CarterCole/bond/core/control"
 	"github.com/CarterCole/bond/core/gateway"
 	"github.com/CarterCole/bond/core/sched"
 	"github.com/CarterCole/bond/core/tunnel"
@@ -194,7 +193,7 @@ func StartHub(o HubOptions) (_ *Hub, err error) {
 		primary = outboundInterface(dst)
 	}
 
-	h.mux = bond.New(bond.Options{Role: bond.Hub, Gen: control.NextGen(o.StateDir), Log: o.Log,
+	h.mux = bond.New(bond.Options{Role: bond.Hub, Gen: cfg.startGen(o.StateDir), Log: o.Log,
 		OnPeerRestart: func(uint32) {
 			// The aggregator came back as a new process: reconnect now
 			// rather than when WireGuard's own timers get round to it.
@@ -276,7 +275,7 @@ func StartHub(o HubOptions) (_ *Hub, err error) {
 		o.Log.Info("no-root mode: use the bond through the SOCKS5 proxy", "socks5", h.socks.Addr().String())
 	}
 	if o.Admin != "-" {
-		if h.admin, err = serveAdmin(o.Admin, h.adminRoutes(), o.Log); err != nil {
+		if h.admin, err = serveAdmin(o.Admin, o.StateDir, h.adminRoutes(), o.Log); err != nil {
 			return nil, err
 		}
 	}

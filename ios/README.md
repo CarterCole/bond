@@ -104,7 +104,10 @@ How the extension and the core share the tunnel:
   own name cannot be. The config remembers where that name last resolved to
   and the core connects there. To keep it current when the aggregator has
   moved, the extension asks the core to look the name up (`MobileRefresh`)
-  each time it starts, before it applies the tunnel's settings.
+  each time it starts, before it applies the tunnel's settings. That also
+  records the generation the start runs as, which must grow with every start
+  (the aggregator refuses older ones), so the config it returns always changes
+  and is always stored.
 - The config is stored exactly as the core returns it: from `MobileJoin`, from
   `MobileRefresh`, and from `configJSON()` after a policy or priority change
   and when the tunnel stops. The extension only ever replaces an existing

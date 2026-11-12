@@ -85,12 +85,24 @@ type session struct {
 // Sender sends to one hub socket through the rendezvous. It is the remote of
 // every path that arrives that way.
 type Sender struct {
-	s    *session
-	id   uint32
-	addr atomic.Pointer[string]
+	s         *session
+	id        uint32
+	addr      atomic.Pointer[string]
+	confirmed atomic.Bool
+	last      atomic.Int64 // unix nanos of the last frame from it
 }
 
 func (h *Sender) SendTo(b []byte, _ netip.AddrPort) error { return h.s.send(frameData, h.id, b) }
+
+// Confirm tells the rendezvous that genuine, current traffic arrives from
+// this hub socket, so that it keeps the socket's handle when others, which
+// anyone could make up, have to make way. The bond calls it for every
+// datagram that verifies and is the newest on its path.
+func (h *Sender) Confirm() {
+	if !h.confirmed.Load() && h.s.ctl.send(ctlMsg{Type: "confirm", Handle: h.id}) {
+		h.confirmed.Store(true)
+	}
+}
 
 // String is the hub socket's address as the rendezvous sees it.
 func (h *Sender) String() string {
@@ -292,12 +304,12 @@ func (s *session) send(typ byte, handle uint32, payload []byte) error {
 }
 
 // keepalive pings until the link has proved itself, then whenever it has
-// been idle long enough for a NAT to forget it, and re-registers when the
-// routes change.
+// been idle long enough for a NAT to forget it, re-registers when the routes
+// change, and forgets handles that have gone quiet.
 func (s *session) keepalive() {
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
-	for {
+	for n := 0; ; n++ {
 		select {
 		case <-s.done:
 			return
@@ -307,6 +319,23 @@ func (s *session) keepalive() {
 			if s.lastRx.Load() == 0 || time.Since(time.Unix(0, s.lastTx.Load())) >= pingIdle {
 				s.send(framePing, 0, nil)
 			}
+			if n%10 == 0 {
+				s.sweep(time.Now())
+			}
+		}
+	}
+}
+
+// sweep forgets handles the rendezvous will have forgotten too. It says so
+// for confirmed ones ("gone"), but not for the unconfirmed, which anyone can
+// make in any number.
+func (s *session) sweep(now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, h := range s.handles {
+		idle := now.Sub(time.Unix(0, h.last.Load()))
+		if (!h.confirmed.Load() && idle > 2*unconfirmedIdle) || idle > 2*time.Minute {
+			delete(s.handles, id)
 		}
 	}
 }
@@ -339,6 +368,7 @@ func (s *session) onFrame(b *path.Buf, from path.Remote) {
 		return
 	}
 	h := s.handle(f.handle)
+	h.last.Store(time.Now().UnixNano())
 	b.N = copy(b.B[:], pkt[FrameLen:])
 	s.c.o.Handler(b, path.Remote{S: h})
 }
@@ -385,7 +415,7 @@ type ClientStatus struct {
 	State      string   `json:"state"` // connecting | pairing | registered
 	LinkUp     bool     `json:"link_up"`
 	Seen       string   `json:"seen_as,omitempty"` // this end of the link, as the rendezvous sees it
-	Sources    int      `json:"sources"`           // hub sockets reaching this aggregator through it
+	Sources    int      `json:"sources"`           // hub sockets confirmed to reach this aggregator through it
 	Refused    []uint32 `json:"refused_sessions,omitempty"`
 	Connected  int64    `json:"connected_sec,omitempty"`
 	Error      string   `json:"error,omitempty"` // why the last connection ended
@@ -407,7 +437,12 @@ func (c *Client) Status() ClientStatus {
 	if s.registered {
 		st.State, st.Error = "registered", ""
 	}
-	st.Seen, st.Sources, st.Refused = s.seen, len(s.handles), s.refused
+	st.Seen, st.Refused = s.seen, s.refused
+	for _, h := range s.handles {
+		if h.confirmed.Load() {
+			st.Sources++
+		}
+	}
 	s.mu.Unlock()
 	return st
 }

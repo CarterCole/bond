@@ -104,11 +104,18 @@ type envelope struct {
 }
 
 // The direction is bound into the ciphertext so a request can never be
-// replayed back as a reply.
+// replayed back as a reply. A reply is also bound to the request it answers
+// (replyAAD), so that one recorded on its way to one device cannot be handed
+// to another device joining with the same code. Version 1 replies were not;
+// they are still sealed for version 1 devices, to tell them to update.
 const (
 	dirRequest = "bond join request v1"
-	dirReply   = "bond join reply v1"
+	dirReplyV1 = "bond join reply v1"
+	dirReply   = "bond join reply v2"
 )
+
+// replyAAD binds a reply to the nonce of the request it answers.
+func replyAAD(req envelope) string { return dirReply + "\x00" + string(req.Nonce) }
 
 func seal(token []byte, dir string, plaintext []byte) (envelope, error) {
 	a, err := sealer(token)

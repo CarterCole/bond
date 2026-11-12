@@ -26,5 +26,7 @@ USER bond
 VOLUME /data
 EXPOSE 7777/udp 7777/tcp
 ENV BOND_PUBLIC=""
+# Where bondd keeps its state, and where `bond` finds its admin token.
+ENV BOND_STATE=/data
 # The status API stays on loopback inside the container; `docker exec bond bond status` reaches it.
 ENTRYPOINT ["/bin/sh", "-c", "exec bondd server --userspace --state /data ${BOND_PUBLIC:+--public \"$BOND_PUBLIC\"} \"$@\"", "--"]

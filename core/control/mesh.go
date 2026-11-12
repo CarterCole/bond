@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/CarterCole/bond/core/tunnel"
+	"github.com/CarterCole/bond/core/wire"
 )
 
 // Node kinds.
@@ -31,6 +32,9 @@ type JoinRequest struct {
 	Kind     string     `json:"kind"`
 	Platform string     `json:"platform,omitempty"`
 	WGPublic tunnel.Key `json:"wg_public"`
+	// Proto is the bond protocol version the device speaks (wire.Version).
+	// Devices that predate it send none, and are told to update.
+	Proto int `json:"proto,omitempty"`
 }
 
 // Mesh is everything a node needs to take part. It is the reply to a join
@@ -67,6 +71,7 @@ func Join(ctx context.Context, code JoinCode, req JoinRequest, hc *http.Client) 
 	if hc == nil {
 		hc = &http.Client{Timeout: 15 * time.Second}
 	}
+	req.Proto = wire.Version
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
@@ -98,9 +103,12 @@ func Join(ctx context.Context, code JoinCode, req JoinRequest, hc *http.Client) 
 	if err := json.Unmarshal(data, &renv); err != nil {
 		return nil, errors.New("join: unintelligible reply; is that address really an aggregator?")
 	}
-	pt, err := open(code.Token[:], dirReply, renv)
+	pt, err := open(code.Token[:], replyAAD(env), renv)
 	if err != nil {
-		return nil, fmt.Errorf("join: the reply was not from a holder of this join code: %w", err)
+		if _, old := open(code.Token[:], dirReplyV1, renv); old == nil {
+			return nil, fmt.Errorf("the aggregator at %s runs an older version of bond: update it first", code.HostPort())
+		}
+		return nil, fmt.Errorf("join: the reply was not from a holder of this join code, or not an answer to this request: %w", err)
 	}
 	var reply joinReply
 	if err := json.Unmarshal(pt, &reply); err != nil {

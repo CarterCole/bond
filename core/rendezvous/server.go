@@ -41,14 +41,17 @@ type Options struct {
 	// from at once. Default 1024.
 	MaxSources int
 	// Idle is how long a hub socket may be silent before its handle is
-	// forgotten. Default 60s.
+	// forgotten. Default 60s. One the aggregator has not confirmed is
+	// forgotten sooner (unconfirmedIdle).
 	Idle time.Duration
 	Log  *slog.Logger
 }
 
 const (
-	joinTimeout = 15 * time.Second
-	maxPending  = 64 // joins in flight per aggregator
+	joinTimeout     = 15 * time.Second
+	maxPending      = 64 // joins in flight per aggregator
+	unconfirmedIdle = 10 * time.Second
+	joinReadTimeout = 15 * time.Second // to send a join request's few hundred bytes
 )
 
 // Server is a running rendezvous.
@@ -96,10 +99,17 @@ type reg struct {
 
 // source is one hub socket sending to an aggregator: a UDP address and
 // port, or a WebSocket connection.
+//
+// Anyone who knows a session id can make a source, from as many addresses as
+// they can send from: the rendezvous cannot check a datagram's tag. So a
+// source counts for little until the aggregator, which can, confirms that
+// genuine current traffic came from it. When an aggregator's sources are
+// full, an unconfirmed one makes way for a newcomer; confirmed ones stay.
 type source struct {
-	handle uint32
-	remote path.Remote
-	last   int64 // unix nanos
+	handle    uint32
+	remote    path.Remote
+	last      int64 // unix nanos
+	confirmed bool
 }
 
 type state struct {
@@ -148,6 +158,7 @@ func Start(o Options) (_ *Server, err error) {
 	if err != nil {
 		return nil, fmt.Errorf("listening on tcp %s: %w", tcpAddr, err)
 	}
+	ln = path.LimitListener(ln, path.MaxConns, path.MaxConnsPerIP)
 	host, port := strings.Trim(o.Public, "[]"), s.port
 	if h, p, err := net.SplitHostPort(o.Public); err == nil {
 		host = h
@@ -170,7 +181,7 @@ func Start(o Options) (_ *Server, err error) {
 		}
 		io.WriteString(w, "bond rendezvous\n")
 	})
-	s.web = &http.Server{Handler: hm, ReadHeaderTimeout: 10 * time.Second}
+	s.web = &http.Server{Handler: hm, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: time.Minute, MaxHeaderBytes: 16 << 10}
 	go s.web.Serve(ln)
 	s.wg.Add(2)
 	go func() {
@@ -262,7 +273,7 @@ func (s *Server) fromHub(b *path.Buf, from path.Remote) {
 	}
 	src := r.sources[from]
 	if src == nil {
-		if len(r.sources) >= s.o.MaxSources {
+		if len(r.sources) >= s.o.MaxSources && !r.evictUnconfirmed() {
 			s.mu.Unlock()
 			s.refused.Add(1)
 			return
@@ -270,7 +281,6 @@ func (s *Server) fromHub(b *path.Buf, from path.Remote) {
 		r.next++
 		src = &source{handle: r.next, remote: from}
 		r.sources[from], r.byHandle[src.handle] = src, src
-		r.ctl.send(ctlMsg{Type: "source", Handle: src.handle, Addr: from.String()})
 	}
 	src.last = time.Now().UnixNano()
 	n := b.N
@@ -361,6 +371,38 @@ func (s *Server) onFrame(b *path.Buf, from netip.AddrPort) {
 	}
 }
 
+// evictUnconfirmed forgets the unconfirmed source heard from longest ago, to
+// make room. It reports false if every source is confirmed.
+func (r *reg) evictUnconfirmed() bool {
+	var oldest *source
+	for _, src := range r.byHandle {
+		if !src.confirmed && (oldest == nil || src.last < oldest.last) {
+			oldest = src
+		}
+	}
+	if oldest == nil {
+		return false
+	}
+	delete(r.byHandle, oldest.handle)
+	delete(r.sources, oldest.remote)
+	return true
+}
+
+// confirm marks a source as carrying genuine traffic, on the aggregator's
+// word, and tells it where the source is.
+func (s *Server) confirm(r *reg, handle uint32) {
+	s.mu.Lock()
+	src := r.byHandle[handle]
+	news := src != nil && !src.confirmed
+	if news {
+		src.confirmed = true
+	}
+	s.mu.Unlock()
+	if news {
+		r.ctl.send(ctlMsg{Type: "source", Handle: handle, Addr: src.remote.String()})
+	}
+}
+
 // reap forgets hub sockets that have gone quiet.
 func (s *Server) reap() {
 	defer s.wg.Done()
@@ -372,14 +414,17 @@ func (s *Server) reap() {
 			return
 		case <-t.C:
 		}
-		cutoff := time.Now().Add(-s.o.Idle).UnixNano()
+		now := time.Now()
+		cutoff, unconfirmed := now.Add(-s.o.Idle).UnixNano(), now.Add(-min(s.o.Idle, unconfirmedIdle)).UnixNano()
 		s.mu.Lock()
 		for _, r := range s.regs {
 			for h, src := range r.byHandle {
-				if src.last < cutoff {
+				if src.last < cutoff || (!src.confirmed && src.last < unconfirmed) {
 					delete(r.byHandle, h)
 					delete(r.sources, src.remote)
-					r.ctl.send(ctlMsg{Type: "gone", Handle: h})
+					if src.confirmed {
+						r.ctl.send(ctlMsg{Type: "gone", Handle: h})
+					}
 				}
 			}
 		}
@@ -395,6 +440,7 @@ func (s *Server) serveJoin(w http.ResponseWriter, hr *http.Request) {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
+	http.NewResponseController(w).SetReadDeadline(time.Now().Add(joinReadTimeout))
 	data, err := io.ReadAll(io.LimitReader(hr.Body, 16<<10))
 	var env struct {
 		Token string `json:"t"`
@@ -485,6 +531,8 @@ func (s *Server) serveControl(w http.ResponseWriter, hr *http.Request) {
 		switch m.Type {
 		case "register":
 			s.register(r, m)
+		case "confirm":
+			s.confirm(r, m.Handle)
 		case "joined":
 			s.mu.Lock()
 			ch := r.pending[m.ID]

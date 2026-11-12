@@ -109,7 +109,7 @@ func ParseCode(s string) (Code, error) {
 //
 // link says which aggregator's link this is, handle which hub socket the
 // datagram came from or is going to, and the tag is SipHash-2-4 over the
-// whole frame keyed by the link key. A bond datagram has its version (1) in
+// whole frame keyed by the link key. A bond datagram has its version (2) in
 // the top four bits of its first byte; a frame has 0xB there, so the two
 // share the rendezvous's UDP port.
 const (
@@ -252,8 +252,9 @@ func deriveKeys(secret, ra, rr []byte) (keys, error) {
 //	registered  rendezvous → aggregator: sessions held by someone else
 //	join        rendezvous → aggregator: a device's sealed join request
 //	joined      aggregator → rendezvous: the answer, as HTTP status and body
-//	source      rendezvous → aggregator: a new hub socket, its handle and address
-//	gone        rendezvous → aggregator: a handle forgotten after going quiet
+//	confirm     aggregator → rendezvous: a handle's traffic is genuine
+//	source      rendezvous → aggregator: a confirmed hub socket's address
+//	gone        rendezvous → aggregator: a confirmed handle forgotten after going quiet
 //	link        rendezvous → aggregator: where the link is seen from
 type ctlMsg struct {
 	Type     string   `json:"type"`

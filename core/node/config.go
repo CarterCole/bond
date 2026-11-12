@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/CarterCole/bond/core/classify"
 	"github.com/CarterCole/bond/core/control"
@@ -22,19 +23,28 @@ import (
 // Version is stamped by the build (-ldflags "-X .../node.Version=…").
 var Version = "dev"
 
-// DefaultStateDir is where keys and mesh state live: a system directory when
-// running as root (as a service does), the user's config directory otherwise.
+// DefaultStateDir is where keys and mesh state live: $BOND_STATE if set,
+// else a system directory when running as root (as a service does), the
+// user's config directory otherwise.
 func DefaultStateDir() string {
+	if d := os.Getenv("BOND_STATE"); d != "" {
+		return d
+	}
 	if os.Geteuid() == 0 {
-		if runtime.GOOS == "darwin" {
-			return "/usr/local/var/bond"
-		}
-		return "/var/lib/bond"
+		return SystemStateDir()
 	}
 	if d, err := os.UserConfigDir(); err == nil {
 		return filepath.Join(d, "bond")
 	}
 	return ".bond"
+}
+
+// SystemStateDir is the state directory of a daemon running as root.
+func SystemStateDir() string {
+	if runtime.GOOS == "darwin" {
+		return "/usr/local/var/bond"
+	}
+	return "/var/lib/bond"
 }
 
 // Config is a joined device's identity and settings, kept in node.json.
@@ -51,8 +61,35 @@ type Config struct {
 	// the tunnel is down — which is exactly when it needs to.
 	Resolved []string    `json:"resolved,omitempty"`
 	Share    ShareConfig `json:"share,omitzero"` // relay role settings
-	file     string
-	mu       sync.Mutex
+	// Gen is the process generation the device starts with next, for
+	// devices with no state directory to keep it in (phones). The aggregator
+	// refuses anything from a generation older than one it has seen, so it
+	// must only grow, even across a clock that went backwards; NextGen
+	// records it and the app stores the config before every start.
+	Gen  uint64 `json:"gen,omitempty"`
+	file string
+	mu   sync.Mutex
+}
+
+// NextGen records the generation of the next start: the clock, or one more
+// than the last recorded if the clock is behind it.
+func (c *Config) NextGen() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.Gen = max(uint64(time.Now().UnixMilli()), c.Gen+1)
+	return c.Gen
+}
+
+// startGen is the generation a process starting from this config runs as:
+// from the state directory when there is one, else as recorded by NextGen.
+func (c *Config) startGen(stateDir string) uint64 {
+	c.mu.Lock()
+	gen := c.Gen
+	c.mu.Unlock()
+	if stateDir != "" || gen == 0 {
+		return control.NextGen(stateDir)
+	}
+	return gen
 }
 
 // ShareConfig are a relay's settings.

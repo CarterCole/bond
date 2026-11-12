@@ -105,9 +105,16 @@ func TestRefreshRecordsWhereTheAggregatorIs(t *testing.T) {
 	if len(parsed.Resolved) != 1 || parsed.Resolved[0] != want {
 		t.Fatalf("join recorded %v, want [%s]", parsed.Resolved, want)
 	}
-	// Nothing moved: the config comes back exactly as it went in.
-	if Refresh(cfg) != cfg {
-		t.Fatal("Refresh rewrote a config that was already current")
+	// Nothing moved: the address stays, and the generation goes up every
+	// time, even when the clock has gone backwards.
+	once, _ := node.ParseConfig([]byte(Refresh(cfg)))
+	if len(once.Resolved) != 1 || once.Resolved[0] != want || once.Gen == 0 {
+		t.Fatalf("refresh of a current config: resolved %v gen %d", once.Resolved, once.Gen)
+	}
+	once.Gen = 1 << 62 // as if recorded when the clock was far ahead
+	twice, _ := node.ParseConfig([]byte(Refresh(string(once.JSON()))))
+	if twice.Gen != 1<<62+1 {
+		t.Fatalf("generation went from %d to %d", once.Gen, twice.Gen)
 	}
 	// The aggregator "moved": the name now points somewhere else.
 	stale := strings.Replace(cfg, `"`+want+`"`, `"192.0.2.9:7777"`, 2)

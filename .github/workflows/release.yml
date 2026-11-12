@@ -27,6 +27,17 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+          check-latest: true # the newest patch release, not an older one cached on the runner
+
+      # setup-go sets GOTOOLCHAIN=local, so go.mod's toolchain line is only
+      # advice: make sure no release is built with an older Go than it names.
+      - name: Check the Go version
+        run: |
+          want=$(sed -n 's/^toolchain go//p' go.mod)
+          have=$(go env GOVERSION | sed 's/^go//')
+          echo "Go $have (go.mod asks for at least ${want:-anything})"
+          [ -z "$want" ] || [ "$(printf '%s\n%s\n' "$want" "$have" | sort -V | head -n1)" = "$want" ] || {
+            echo "::error::built with Go $have, older than the $want go.mod asks for"; exit 1; }
 
       - name: Test
         run: go vet ./... && go test -short ./...
