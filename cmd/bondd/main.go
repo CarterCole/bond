@@ -1,8 +1,9 @@
-// bondd is the bond daemon. One binary, three roles:
+// bondd is the bond daemon. One binary, four roles:
 //
-//	bondd server   the aggregator: runs on a machine with a public address
-//	bondd hub      bonds this machine's uplinks (and relays it finds) to the aggregator
-//	bondd relay    lends this machine's uplink to hubs on the same LAN
+//	bondd server      the aggregator: runs on a machine with a public address
+//	bondd hub         bonds this machine's uplinks (and relays it finds) to the aggregator
+//	bondd relay       lends this machine's uplink to hubs on the same LAN
+//	bondd rendezvous  a public meeting point for aggregators that have no public address
 //
 // and `bondd service` to keep any of them running in the background.
 package main
@@ -30,7 +31,8 @@ Usage:
   bondd server  [flags]     run the aggregator (the cloud end)
   bondd hub     [flags]     bond this machine's uplinks to an aggregator
   bondd relay   [flags]     share this machine's uplink with hubs on the LAN
-  bondd service install|uninstall|restart|status <server|hub|relay> [role flags]
+  bondd rendezvous [flags]  let aggregators with no public address be reached through this one
+  bondd service install|uninstall|restart|status <server|hub|relay|rendezvous> [role flags]
   bondd version
 
 Run "bondd <role> -h" for that role's flags.
@@ -39,6 +41,10 @@ Quick start:
   on a server with a public address:   bondd server --public <address>
   on the machine to speed up:          sudo bondd hub --join <code the server printed>
   on anything with a spare connection: bondd relay --join <code>
+
+An aggregator that nothing can reach (no port forward, carrier NAT):
+  on a server with a public address:   bondd rendezvous --public <address>
+  on the aggregator:                   bondd server --via <code the rendezvous printed>
 `
 
 func main() {
@@ -54,6 +60,8 @@ func main() {
 		err = runHub(args)
 	case "relay":
 		err = runRelay(args)
+	case "rendezvous":
+		err = runRendezvous(args)
 	case "service":
 		err = runService(args)
 	case "version", "-v", "--version":
@@ -129,7 +137,11 @@ func runServer(args []string) error {
 	fs.StringVar(&o.Public, "public", "", "address devices reach this server at: host or host:port (detected if omitted)")
 	fs.BoolVar(&o.Userspace, "userspace", false, "route to the Internet from inside this process: no root, TUN or iptables needed")
 	fs.StringVar(&o.WS, "ws-url", "", "WebSocket fallback URL to hand to devices, e.g. wss://bond.example.com/v1/ws behind a Cloudflare Tunnel")
+	fs.StringVar(&o.TLS, "tls", "", "also serve the WebSocket fallback over TLS on this address, e.g. :443 (certificate from Let's Encrypt when --public is a DNS name, self-signed otherwise)")
+	fs.StringVar(&o.TLSCert, "tls-cert", "", "certificate for --tls, PEM with its chain (instead of Let's Encrypt); reloaded when it changes")
+	fs.StringVar(&o.TLSKey, "tls-key", "", "private key for --tls-cert, PEM")
 	fs.BoolVar(&o.NoUPnP, "no-upnp", false, "do not ask the router in front of this machine to forward the port (UPnP)")
+	fs.StringVar(&o.Via, "via", "", "pairing code of a rendezvous: needs no inbound port; devices reach this server through the rendezvous")
 	fs.Parse(args)
 
 	o.StateDir, o.Admin, o.Log = c.stateDir(), c.admin, c.logger()
@@ -164,6 +176,33 @@ func printJoin(code control.JoinCode) {
 	}
 	fmt.Println("  On a computer:  sudo bondd hub --join '" + code.String() + "'")
 	fmt.Println()
+}
+
+func runRendezvous(args []string) error {
+	var c common
+	var o node.RendezvousOptions
+	fs := newFlags("rendezvous", "let aggregators with no public address be reached through this one")
+	c.register(fs)
+	fs.StringVar(&o.Listen, "listen", "", "address to listen on, UDP and TCP (default :7777)")
+	fs.StringVar(&o.Public, "public", "", "address aggregators and devices reach this server at: host or host:port (detected if omitted)")
+	fs.Parse(args)
+
+	o.StateDir, o.Admin, o.Log = c.stateDir(), c.admin, c.logger()
+	n, err := node.StartRendezvous(o)
+	if err != nil {
+		return err
+	}
+	defer n.Close()
+	code := n.Code().String()
+	fmt.Println()
+	fmt.Println("  Pairing code (anyone holding it can register an aggregator here — treat it like a password):")
+	fmt.Println()
+	fmt.Println("    " + code)
+	fmt.Println()
+	fmt.Println("  On the aggregator:  sudo bondd server --via '" + code + "'")
+	fmt.Println()
+	wait()
+	return nil
 }
 
 func runHub(args []string) error {

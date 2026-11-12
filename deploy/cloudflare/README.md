@@ -16,6 +16,11 @@ What Cloudflare can and cannot do here:
   public address and UDP port 7777 open; Cloudflare is the way in when UDP is
   not available, not a replacement for it.
 
+The aggregator can also serve the fallback over HTTPS itself, with
+`--tls :443` (see [When UDP is blocked](../../README.md#when-udp-is-blocked)).
+Cloudflare is the choice when you would rather not open port 443 on the
+aggregator, or want hubs to connect to a Cloudflare address instead of yours.
+
 ## Setup
 
 On the aggregator:

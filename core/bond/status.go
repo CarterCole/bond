@@ -13,6 +13,7 @@ type PathStatus struct {
 	Policy      string  `json:"policy"`
 	Up          bool    `json:"up"`
 	Remote      string  `json:"remote"`
+	Via         string  `json:"via,omitempty"` // a rendezvous the path goes through
 	RTTMs       float64 `json:"rtt_ms"`
 	MinRTTMs    float64 `json:"min_rtt_ms"`
 	Loss        float64 `json:"loss"`
@@ -70,6 +71,9 @@ func (s *Session) status(p *Path, _ int64) PathStatus {
 	}
 	if p.remote.S != nil {
 		st.Remote = p.remote.String()
+		if v, ok := p.remote.S.(interface{ Via() string }); ok {
+			st.Via = v.Via()
+		}
 	}
 	if p.Capacity > 0 {
 		st.CapacityBps = p.Capacity * 8

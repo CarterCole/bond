@@ -65,6 +65,10 @@ A path is one way of getting a datagram from hub to aggregator:
   aggregator from its own uplink. The relay keeps a NAT-style mapping per hub
   socket and is otherwise stateless.
 - **ws** — a WebSocket to the aggregator, one binary message per datagram.
+  It is plain on the aggregator's TCP port, or over TLS (`wss://`) when the
+  aggregator serves it with `--tls` or sits behind a Cloudflare Tunnel. The
+  hub does not check the certificate: the datagrams are sealed already, and
+  TLS is there to look like HTTPS to networks that allow nothing else.
 
 The hub opens paths; the aggregator learns them from what arrives and replies
 to wherever a path's newest datagram came from, so a path survives its address
@@ -222,6 +226,74 @@ every successful lookup, and connects on the remembered address whenever a
 lookup fails. A hub also does its first lookup before it touches the routing
 table.
 
+## Through a rendezvous
+
+An aggregator started with `--via <pairing code>` needs no inbound port. It
+dials out to a rendezvous on a public host, and the join codes it hands out
+name the rendezvous, so hubs, relays and phones send there exactly what they
+would send to an aggregator. Nothing changes for them.
+[TOPOLOGY.md](TOPOLOGY.md) has the design and what comes after.
+
+**Pairing.** A pairing code, `bond-rv://host:port/SECRET`, holds a 160-bit
+secret like a join code's. The aggregator opens a WebSocket to
+`/v1/rendezvous` on the rendezvous's TCP port and sends a hello sealed
+(XChaCha20-Poly1305) under a key derived from the secret, carrying 32 random
+bytes. The welcome comes back sealed the same way and bound to the hello,
+carrying 32 random bytes of the rendezvous's own and a link id. Both ends
+derive the connection's keys from the secret and both sets of random bytes: a
+link key, and a key for each direction of control messages. A replayed hello
+earns a welcome that nobody can use.
+
+**Control** messages are sealed with a counter for nonce, which the reader
+insists on, so none can be replayed, reordered or dropped unnoticed. The first
+must be a registration: the mesh id, every node's session id and every join
+token's id. It is sent again whenever those change, and before the answer to
+every join, so a device that has just joined is routed before it sends
+anything. A registration lasts as long as its connection; a new connection
+for the same mesh replaces it. Joins reach the rendezvous as ordinary POSTs to
+`/v1/join`, go to the aggregator that registered the token id the request
+names, and are answered the same way back, sealed under the join code
+throughout.
+
+**The link** is a UDP socket from the aggregator to the rendezvous's UDP port.
+Each datagram crosses it in a frame:
+
+```
+ 0       1        5          9          13         21
++-------+--------+----------+----------+----------+-------------------
+| type  |  link  |  handle  | link seq |   tag    | bond datagram ...
++-------+--------+----------+----------+----------+-------------------
+```
+
+| Field | |
+|---|---|
+| `type` | data, ping or pong: 0xB1–0xB3. A bond datagram has its version in those four bits, so the two share a port |
+| `link` | which aggregator's link, from the welcome |
+| `handle` | the rendezvous's number for one hub socket: a UDP address and port, or a WebSocket connection. It tells the aggregator each new one on the control connection |
+| `link seq` | counts frames each way |
+| `tag` | SipHash-2-4 over the frame, keyed by the link key |
+
+The aggregator pings every second until the first pong, then whenever the link
+has been idle for 25 seconds, which keeps the NAT mapping in front of it open.
+A frame that verifies and is newer than any before moves the link to wherever
+it came from, as a path roams, so a home line whose address changes carries
+on.
+
+To the aggregator a handle is a remote like any other, and a path through the
+rendezvous moves between handles by the usual rule: only a datagram that
+verifies and advances the path sequence moves it. A rendezvous that misroutes
+can break a path but not redirect one. A full 1340-byte datagram is 1409
+bytes on the link with IPv6 and UDP headers.
+
+**What the rendezvous refuses:** datagrams that do not parse as travelling from
+a hub to an aggregator, or whose session nobody registered; frames that fail
+their tag; replies that are not going from an aggregator to a hub, or are for
+a handle silent for a minute; more than 1024 hub sockets for one aggregator.
+It has no session keys, so it routes on the session id alone. A session id
+another aggregator registered first stays with that one; the late aggregator
+is told and logs it, and that device would have to join again to get another
+id.
+
 ## IPv4 only, deliberately
 
 The tunnel carries IPv4. A hub that captures all traffic therefore makes the
@@ -249,6 +321,12 @@ routes IPv6 into the tunnel, where it is dropped.
   terminates TCP and UDP and re-originates them; pings to the Internet are
   answered by the aggregator itself, not the real destination. Kernel mode
   forwards real ICMP.
+- **The rendezvous speaks plain HTTP.** Its control connection and WebSocket
+  paths use its TCP port without TLS. Everything on them is sealed, but they
+  do not look like HTTPS to a network that allows nothing else.
+- **One pairing code per rendezvous.** Every aggregator holding it is trusted
+  not to claim another's mesh or sessions. Nor is there yet a limit on the
+  rate any one source may send to a rendezvous.
 - **Sequence numbers are 32-bit** with serial-number arithmetic: fine at any
   realistic rate, but a session idle through more than 2³¹ of the peer's
   datagrams would misjudge order once.

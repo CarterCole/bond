@@ -2,6 +2,7 @@ package path
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"net"
 	"net/http"
@@ -18,7 +19,8 @@ import (
 // is one binary message. Being TCP underneath it suffers head-of-line
 // blocking, so the scheduler will only lean on it as hard as it deserves —
 // but a slow path beats no path. Because it is plain HTTP(S) it can also sit
-// behind a CDN or tunnel such as Cloudflare.
+// behind a CDN or tunnel such as Cloudflare, or be served over TLS by the
+// aggregator itself.
 
 const (
 	wsQueue        = 256
@@ -155,7 +157,16 @@ func (w *WSClient) String() string { return w.url }
 
 func (w *WSClient) run() {
 	d := &net.Dialer{Timeout: 10 * time.Second, Control: control(w.opts)}
-	hc := &http.Client{Transport: &http.Transport{DialContext: d.DialContext, ForceAttemptHTTP2: false}}
+	hc := &http.Client{Transport: &http.Transport{
+		DialContext:       d.DialContext,
+		ForceAttemptHTTP2: false,
+		// The certificate is not what keeps this path safe: every datagram
+		// on it is sealed by the bond and carries WireGuard inside. TLS is
+		// here to get through networks that allow only HTTPS, some of which
+		// re-sign it with their own CA, and an aggregator with no DNS name
+		// serves a certificate it made itself.
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}}
 	backoff := time.Second
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

@@ -23,6 +23,7 @@ import (
 	"github.com/CarterCole/bond/core/classify"
 	"github.com/CarterCole/bond/core/node"
 	"github.com/CarterCole/bond/core/portmap"
+	"github.com/CarterCole/bond/core/rendezvous"
 )
 
 const usage = `bond — control a running bondd
@@ -153,7 +154,7 @@ func unwrap(err error) error {
 	}
 }
 
-// status is the union of the three roles' status documents.
+// status is the union of the four roles' status documents.
 type status struct {
 	Role string `json:"role"`
 	node.HubStatus
@@ -170,7 +171,10 @@ type status struct {
 		Port      int    `json:"port"`
 		Upstream  string `json:"upstream"`
 	} `json:"relay"`
-	Uplink string `json:"uplink"`
+	Uplink      string                   `json:"uplink"`
+	Via         *rendezvous.ClientStatus `json:"via"`
+	Rendezvous  *rendezvous.ServerStatus `json:"rendezvous"`
+	PairingCode string                   `json:"pairing_code"`
 }
 
 func getStatus() (*status, []byte, error) {
@@ -217,8 +221,17 @@ func pathTable(w io.Writer, indent string, paths []bond.PathStatus) {
 		fmt.Fprintln(w, indent+"(no paths)")
 		return
 	}
+	// Paths that reach this aggregator through a rendezvous say which one.
+	via := false
+	for _, p := range paths {
+		via = via || p.Via != ""
+	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, indent+"PATH\tKIND\tPOLICY\tSTATE\tRTT\tLOSS\tSEND CAP\tUP\tDOWN")
+	head := indent + "PATH\tKIND\tPOLICY\tSTATE\tRTT\tLOSS\tSEND CAP\tUP\tDOWN"
+	if via {
+		head += "\tVIA"
+	}
+	fmt.Fprintln(tw, head)
 	for _, p := range paths {
 		state, rtt, capacity := "down", "-", "-"
 		switch {
@@ -236,8 +249,12 @@ func pathTable(w io.Writer, indent string, paths []bond.PathStatus) {
 		if p.CapacityBps > 0 {
 			capacity = rate(p.CapacityBps)
 		}
-		fmt.Fprintf(tw, "%s%s\t%s\t%s\t%s\t%s\t%.1f%%\t%s\t%s\t%s\n", indent,
+		fmt.Fprintf(tw, "%s%s\t%s\t%s\t%s\t%s\t%.1f%%\t%s\t%s\t%s", indent,
 			p.Name, p.Kind, p.Policy, state, rtt, p.Loss*100, capacity, rate(p.TxBps), rate(p.RxBps))
+		if via {
+			fmt.Fprintf(tw, "\t%s", firstNonEmpty(p.Via, "direct"))
+		}
+		fmt.Fprintln(tw)
 	}
 	tw.Flush()
 }
@@ -278,6 +295,9 @@ func render(w io.Writer, st *status) {
 		if st.PortMap != nil {
 			fmt.Fprintln(w, "router:", st.PortMap.Note)
 		}
+		if v := st.Via; v != nil {
+			fmt.Fprintln(w, "rendezvous:", viaState(v))
+		}
 		fmt.Fprintln(w)
 		for _, n := range st.Nodes {
 			fmt.Fprintf(w, "[%d] %s  %s  %s  %s\n", n.ID, n.Name, n.Kind, n.IP, nodeState(n))
@@ -292,9 +312,46 @@ func render(w io.Writer, st *status) {
 		fmt.Fprintf(w, "relay %s  sharing %s  listening on udp port %d  forwarding to %s\n", st.Name,
 			firstNonEmpty(st.Uplink, "the default uplink"), st.Relay.Port, st.Relay.Upstream)
 		fmt.Fprintf(w, "%d hub path(s) through it   forwarded up %s   down %s\n", st.Relay.Clients, size(st.Relay.UpBytes), size(st.Relay.DownBytes))
+	case "rendezvous":
+		r := st.Rendezvous
+		fmt.Fprintf(w, "rendezvous  %s  %d aggregator(s) registered   forwarded up %s   down %s   refused %d\n",
+			r.Public, len(r.Aggregators), size(r.UpBytes), size(r.DownBytes), r.Refused)
+		fmt.Fprintln(w, "pairing code:", st.PairingCode)
+		if len(r.Aggregators) > 0 {
+			fmt.Fprintln(w)
+			tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(tw, "MESH\tLINK FROM\tCONNECTED\tDEVICES\tSOCKETS\tUP\tDOWN")
+			for _, a := range r.Aggregators {
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%d\t%s\t%s\n", a.Mesh, firstNonEmpty(a.Link, "(no link yet)"),
+					(time.Duration(a.Connected) * time.Second).String(), a.Sessions, a.Sources, size(a.UpBytes), size(a.DownBytes))
+			}
+			tw.Flush()
+		}
 	default:
 		fmt.Fprintf(w, "unknown role %q\n", st.Role)
 	}
+}
+
+// viaState words an aggregator's connection to its rendezvous.
+func viaState(v *rendezvous.ClientStatus) string {
+	switch {
+	case v.State != "registered":
+		s := v.State + " to " + v.Rendezvous
+		if v.Error != "" {
+			s += " (last attempt: " + v.Error + ")"
+		}
+		return s
+	case !v.LinkUp:
+		return "registered with " + v.Rendezvous + ", link not answering"
+	}
+	s := fmt.Sprintf("registered with %s, link up", v.Rendezvous)
+	if v.Seen != "" {
+		s += ", seen as " + v.Seen
+	}
+	if len(v.Refused) > 0 {
+		s += fmt.Sprintf("; %d device(s) not routed: another aggregator holds their sessions", len(v.Refused))
+	}
+	return s
 }
 
 // nodeState words a device's state. A relay is only ever observed through

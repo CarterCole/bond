@@ -28,7 +28,9 @@ type unit struct {
 	content string
 }
 
-func validRole(r string) bool { return r == "server" || r == "hub" || r == "relay" }
+func validRole(r string) bool {
+	return r == "server" || r == "hub" || r == "relay" || r == "rendezvous"
+}
 
 // systemdUnit renders the unit for a role.
 func systemdUnit(exe, role string, args []string) unit {
@@ -106,7 +108,7 @@ func shellJoin(args []string) string {
 
 func runService(args []string) error {
 	if len(args) < 2 || !validRole(args[1]) {
-		return errors.New("usage: bondd service install|uninstall|restart|status <server|hub|relay> [role flags]")
+		return errors.New("usage: bondd service install|uninstall|restart|status <server|hub|relay|rendezvous> [role flags]")
 	}
 	action, role, rest := args[0], args[1], args[2:]
 	if len(rest) > 0 && rest[0] == "--" {
@@ -132,7 +134,7 @@ func runService(args []string) error {
 		// A hub or relay must have joined before it can run unattended. Join
 		// here and now rather than passing the code on to the service: the
 		// code is a secret, and unit files and process listings are not.
-		if role != "server" {
+		if role == "hub" || role == "relay" {
 			var code string
 			rest, code = stripFlag(rest, "join")
 			dir := stateDirFrom(rest)

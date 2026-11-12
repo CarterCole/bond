@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -75,14 +76,22 @@ type Registry struct {
 	// OnJoin is called, outside the lock, whenever a node is added or its
 	// details change, so the data plane can be told.
 	OnJoin func(n Node)
+	// OnChange is called, outside the lock, whenever the set of nodes or of
+	// join tokens changes: what a rendezvous routes by.
+	OnChange func()
+}
+
+func (r *Registry) changed() {
+	if r.OnChange != nil {
+		r.OnChange()
+	}
 }
 
 // RegistryOptions seed a new mesh. They are ignored when state already exists,
-// except Public and WS, which update it when given.
+// except Public, which updates it when given.
 type RegistryOptions struct {
 	Network string
 	Public  []string
-	WS      []string
 	MTU     int
 	DNS     []netip.Addr
 }
@@ -96,14 +105,8 @@ func OpenRegistry(dir string, o RegistryOptions) (*Registry, error) {
 	err := LoadJSON(r.file, &r.st)
 	switch {
 	case err == nil:
-		changed := false
-		if len(o.Public) > 0 && strings.Join(o.Public, ",") != strings.Join(r.st.Public, ",") {
-			r.st.Public, changed = o.Public, true
-		}
-		if o.WS != nil && strings.Join(o.WS, ",") != strings.Join(r.st.WS, ",") {
-			r.st.WS, changed = o.WS, true
-		}
-		if changed {
+		if len(o.Public) > 0 && !slices.Equal(o.Public, r.st.Public) {
+			r.st.Public = o.Public
 			return r, r.save()
 		}
 		return r, nil
@@ -135,7 +138,6 @@ func OpenRegistry(dir string, o RegistryOptions) (*Registry, error) {
 		WGPrivate: priv,
 		Network:   network.Masked(),
 		Public:    o.Public,
-		WS:        o.WS,
 		MTU:       o.MTU,
 		DNS:       o.DNS,
 	}
@@ -158,6 +160,17 @@ func (r *Registry) Public() []string {
 	return append([]string(nil), r.st.Public...)
 }
 
+// SetWS sets the WebSocket fallback URLs devices are told about when they join.
+func (r *Registry) SetWS(ws []string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if slices.Equal(ws, r.st.WS) {
+		return nil
+	}
+	r.st.WS = ws
+	return r.save()
+}
+
 // Nodes returns a copy of the registered nodes.
 func (r *Registry) Nodes() []Node {
 	r.mu.Lock()
@@ -171,6 +184,14 @@ func (r *Registry) Nodes() []Node {
 
 // NewToken mints a join code. ttl 0 never expires; maxUses 0 is unlimited.
 func (r *Registry) NewToken(note string, ttl time.Duration, maxUses int) (JoinCode, error) {
+	code, err := r.newToken(note, ttl, maxUses)
+	if err == nil {
+		r.changed()
+	}
+	return code, err
+}
+
+func (r *Registry) newToken(note string, ttl time.Duration, maxUses int) (JoinCode, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if len(r.st.Public) == 0 {
@@ -219,26 +240,43 @@ func (r *Registry) StandingCode() (JoinCode, error) {
 // RevokeToken invalidates a join code by id. Devices already joined stay joined.
 func (r *Registry) RevokeToken(id string) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	for i, t := range r.st.Tokens {
 		if t.ID == id {
 			r.st.Tokens = append(r.st.Tokens[:i], r.st.Tokens[i+1:]...)
-			return r.save()
+			err := r.save()
+			r.mu.Unlock()
+			r.changed()
+			return err
 		}
 	}
+	r.mu.Unlock()
 	return fmt.Errorf("no join code with id %s", id)
+}
+
+// TokenIDs lists the ids of the join tokens the registry holds.
+func (r *Registry) TokenIDs() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ids := make([]string, len(r.st.Tokens))
+	for i, t := range r.st.Tokens {
+		ids[i] = t.ID
+	}
+	return ids
 }
 
 // RemoveNode expels a node. The caller must also drop it from the data plane.
 func (r *Registry) RemoveNode(id int) (Node, error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	for i, n := range r.st.Nodes {
 		if n.ID == id {
 			r.st.Nodes = append(r.st.Nodes[:i], r.st.Nodes[i+1:]...)
-			return *n, r.save()
+			err := r.save()
+			r.mu.Unlock()
+			r.changed()
+			return *n, err
 		}
 	}
+	r.mu.Unlock()
 	return Node{}, fmt.Errorf("no node with id %d", id)
 }
 
@@ -362,10 +400,27 @@ func (r *Registry) ServeJoin(w http.ResponseWriter, hr *http.Request) {
 		return
 	}
 	data, err := io.ReadAll(io.LimitReader(hr.Body, 16<<10))
-	var env envelope
-	if err != nil || json.Unmarshal(data, &env) != nil {
+	if err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
+	}
+	status, body := r.Join(data)
+	if status == http.StatusOK {
+		w.Header().Set("Content-Type", "application/json")
+	} else {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	}
+	w.WriteHeader(status)
+	w.Write(body)
+}
+
+// Join answers one join request: the body of a POST to /v1/join in, the
+// HTTP status and body of the answer out. A rendezvous passes requests
+// along to it without either end of the exchange being on HTTP here.
+func (r *Registry) Join(data []byte) (int, []byte) {
+	var env envelope
+	if json.Unmarshal(data, &env) != nil {
+		return http.StatusBadRequest, []byte("bad request\n")
 	}
 
 	r.mu.Lock()
@@ -379,14 +434,12 @@ func (r *Registry) ServeJoin(w http.ResponseWriter, hr *http.Request) {
 	now := time.Now()
 	if tok == nil || (!tok.Expires.IsZero() && now.After(tok.Expires)) {
 		r.mu.Unlock()
-		http.Error(w, "unknown or expired join code", http.StatusForbidden)
-		return
+		return http.StatusForbidden, []byte("unknown or expired join code\n")
 	}
 	pt, err := open(tok.Secret, dirRequest, env)
 	if err != nil {
 		r.mu.Unlock()
-		http.Error(w, "unknown or expired join code", http.StatusForbidden)
-		return
+		return http.StatusForbidden, []byte("unknown or expired join code\n")
 	}
 	var reply joinReply
 	var joined *Node
@@ -410,14 +463,16 @@ func (r *Registry) ServeJoin(w http.ResponseWriter, hr *http.Request) {
 	body, _ := json.Marshal(reply)
 	out, err := seal(secret, dirReply, body)
 	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
+		return http.StatusInternalServerError, []byte("internal error\n")
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(out)
-	if joined != nil && r.OnJoin != nil {
-		r.OnJoin(*joined)
+	if joined != nil {
+		if r.OnJoin != nil {
+			r.OnJoin(*joined)
+		}
+		r.changed()
 	}
+	enc, _ := json.Marshal(out)
+	return http.StatusOK, append(enc, '\n')
 }
 
 func (r *Registry) known(pub tunnel.Key) bool {

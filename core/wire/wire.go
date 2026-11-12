@@ -129,6 +129,10 @@ func Seal(k *Key, pkt []byte) {
 	binary.LittleEndian.PutUint64(pkt[tagOff:], sipHash24(k.k0, k.k1, pkt))
 }
 
+// Sum is SipHash-2-4 of p under k, for other framings that need the same
+// kind of tag.
+func Sum(k *Key, p []byte) uint64 { return sipHash24(k.k0, k.k1, p) }
+
 // Verify checks pkt's tag. It leaves pkt unchanged.
 func Verify(k *Key, pkt []byte) bool {
 	if len(pkt) < HeaderLen {

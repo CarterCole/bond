@@ -91,7 +91,8 @@ the local network is unaffected, and it is undone when the hub stops).
   network interface and becomes a path within a couple of seconds.
 - Run `bondd relay --join <code>` on anything on the same LAN that has its own
   connection, or turn on **Share my connection** in the phone app. Hubs find
-  relays on the LAN by themselves.
+  relays on the LAN by themselves, as long as the network lets its devices
+  reach each other (see [Lending several phones](#lending-several-phones)).
 
 **4. Watch it.**
 
@@ -112,7 +113,7 @@ relay:Pixel-9  relay   bonded   up     61 ms  0.4%  2.8 Mbit/s  0 bit/s     2.2 
 The same thing, live, is a dashboard at <http://127.0.0.1:7780> on any machine
 running `bondd`. On the aggregator it shows the join QR and every device.
 
-**5. Keep it running.** `sudo bondd service install hub` (or `server`, `relay`)
+**5. Keep it running.** `sudo bondd service install hub` (or `server`, `relay`, `rendezvous`)
 installs a systemd unit on Linux or a launchd daemon on macOS. Pass `--join` and
 it joins on the spot, so the code never ends up in a unit file. After an
 upgrade (`brew upgrade bond`, or a new binary) `sudo bondd service restart hub`
@@ -168,10 +169,66 @@ mode through `pf`, without per-device priority. It has not been tested.)
 
 Some networks only let web traffic through. If an uplink's UDP path stays dead
 for eight seconds, the hub opens a WebSocket path over that uplink instead, and
-closes it again once UDP is back. `--transport ws` forces it. Put the
-aggregator's TCP port behind a Cloudflare Tunnel and the fallback looks like
-ordinary HTTPS: see [deploy/cloudflare](deploy/cloudflare/README.md), which
-also explains why Cloudflare can carry the fallback but not the bond itself.
+closes it again once UDP is back. `--transport ws` forces it.
+
+That WebSocket goes to TCP port 7777, which a network that blocks UDP often
+blocks as well. With `--tls :443` the aggregator also serves it over TLS on
+port 443 and tells devices to use `wss://<its public address>/v1/ws`, which
+looks like ordinary HTTPS:
+
+```bash
+sudo bondd server --public bond.example.com --tls :443
+```
+
+When `--public` is a DNS name pointing at the aggregator, it gets a
+certificate from Let's Encrypt and renews it (which accepts their subscriber
+agreement). Let's Encrypt checks the name by connecting to port 443, so that
+port has to be reachable from the Internet. With an IP address, or until Let's
+Encrypt succeeds, the aggregator serves a certificate it made itself;
+`--tls-cert` and `--tls-key` use yours instead and pick up renewals. Hubs do
+not check the certificate. Every datagram is already sealed by the bond and
+by WireGuard, and not checking lets the fallback through proxies that inspect
+HTTPS and re-sign it. Open TCP 443 as well as 7777. Behind a router, UPnP
+forwards both.
+
+Devices learn the URL when they join. Ones that joined earlier keep the old
+URL until they join again (`bond join <code>`: they keep their identity and
+address).
+
+A Cloudflare Tunnel in front of the aggregator's TCP port does the same job
+without opening 443 on it: see [deploy/cloudflare](deploy/cloudflare/README.md),
+which also explains why Cloudflare can carry the fallback but not the bond
+itself.
+
+## When the aggregator has no public address
+
+An aggregator needs a port that hubs can reach. Behind a router that will not
+forward one, behind carrier NAT, or plugged into a gateway beside the router
+that holds the public address, it has none. A **rendezvous** on any small
+public server fixes that:
+
+```bash
+bondd rendezvous --public rv.example.com          # on the public server: prints a pairing code
+sudo bondd server --via 'bond-rv://…the code…'    # on the aggregator
+```
+
+The aggregator dials out to the rendezvous and keeps the connection open, so
+it needs no port forward and asks for none. The join codes it prints name the
+rendezvous: hubs, relays and phones send there what they would have sent to
+the aggregator, and need nothing new. The rendezvous sees sealed datagrams
+and the session and token ids it routes by, nothing else. Open UDP and TCP
+7777 on it. On the aggregator, `bond status` says whether it is registered and
+marks the paths that come through the rendezvous.
+
+All the traffic still crosses the rendezvous, so its bandwidth bounds the
+bond, and on a cloud VM its egress costs what an aggregator's there would. It
+is worth it when the traffic should leave from the aggregator's own
+connection: a home line, an office. Devices that joined the aggregator
+directly have to join again (`bond join <code>`; they keep their identity and
+address). `--via` replaces `--public` and `--tls`, and the rendezvous serves
+the WebSocket fallback on plain TCP 7777 for now.
+[docs/TOPOLOGY.md](docs/TOPOLOGY.md) has the design and what comes next, such
+as hubs reaching the aggregator directly once both NATs allow it.
 
 ## Phones
 
@@ -193,6 +250,35 @@ emulator; neither has been run on a real phone, and the iOS tunnel cannot
 run anywhere but a real phone. Each folder's README says exactly what was and
 was not tried, and what you need to set — for iOS, your developer team and
 the Network Extension and App Group capabilities.
+
+### Lending several phones
+
+A phone in Share mode lends its cellular connection. Its WiFi is only the hop
+to the hub, so it needs one WiFi network, the one the hub is on, and three
+phones on the hub's WiFi lend three cellular connections. Two things get in
+the way:
+
+- **Client isolation.** Venue and guest WiFi often stops the devices on it
+  from reaching each other. The hub then never sees the phone's announcement
+  and cannot reach its port (UDP 7778), so the phone lends nothing and no
+  `relay:` path appears in `bond status`.
+- **The hub has one WiFi radio too.** A hub that joins a phone's hotspot over
+  WiFi leaves the venue's WiFi, so it swaps one uplink for another instead of
+  adding one.
+
+Ways around them (none tried here with real phones):
+
+- **USB tethering.** Each phone becomes its own interface and no WiFi is
+  involved. It also charges the phone, and it is the dependable way to lend
+  an iPhone's connection. A powered USB hub takes several phones.
+- **A network of your own.** A travel router in repeater mode joins the
+  venue's WiFi and offers its own network, where nothing is isolated. The hub
+  and the phones in Share mode join that. The hub's one interface then
+  carries the venue's connection, through the router, as well as a path
+  through each phone.
+- **More WiFi adapters on a Linux hub.** One USB WiFi adapter per phone
+  hotspot: each is its own interface and so its own path, with no app on the
+  phones. macOS supports few USB WiFi adapters.
 
 ## With Tailscale
 
@@ -223,10 +309,15 @@ be Bond's WireGuard, not Tailscale's.
   (the cloud metadata service).
 - A relay forwards only to its own mesh's aggregator, only for local
   addresses, only what looks like a hub's datagram.
+- A rendezvous forwards only datagrams for sessions an aggregator registered,
+  only to that aggregator, and replies only to sockets that have sent to it in
+  the last minute. Registering takes its pairing code, which, like a join
+  code, never crosses the network.
 - The status API listens on loopback and rejects requests a web page could
   forge.
-- Behind a router, the aggregator asks it (UPnP) to forward its one port and
-  nothing else, and removes the forward when it stops. It ignores anything on
+- Behind a router, the aggregator asks it (UPnP) to forward its port (and the
+  TLS port, with `--tls`) and nothing else, and removes the forwards when it
+  stops. It ignores anything on
   the LAN that claims to be the router but points somewhere else.
 
 [docs/PROTOCOL.md](docs/PROTOCOL.md) has the details and the known limits.
@@ -251,6 +342,8 @@ Measured, not estimated:
 | iOS app in the simulator: join against a live aggregator; its relay advertisement found by a desktop hub | works (the tunnel itself cannot run in a simulator) |
 | Aggregator restarted under a running hub | traffic resumes in about 1 s |
 | `deploy/push.sh` to an Ubuntu 24.04 server on a home LAN, then again to upgrade | installs the service, runs in kernel mode, prints the join code; the second run restarts it on the new binary |
+| Aggregator behind a simulated NAT, registered with a rendezvous, a hub on two paths, all over loopback | joins through the rendezvous; 2 MB download; carries on when the NAT moves the link to a new port and after the rendezvous restarts; WebSocket and relay paths work through it |
+| The real binaries on one Mac: `bondd rendezvous`, `bondd server --via`, a relay, and a hub in `--userspace` mode with two paths, its own uplink and the relay | 99 MB downloads from the Internet through rendezvous and aggregator; kill the relay mid-download and its path is marked down within a second and the download completes; `bond status` and the dashboard show each role |
 | Tagging v0.1.0: the release workflow, then `brew install cartercole/tap/bond` on macOS (Apple Silicon) | tests pass on GitHub, archives published, tap updated; installs `bondd` and `bond`; `brew test` starts an aggregator and gets its join code; `brew audit --strict --online` passes |
 
 `make test` runs the suite (about a minute): unit tests, the engine against
@@ -276,6 +369,7 @@ loopback sockets.
   write into the unit is tested.
 - UPnP port forwarding on a real router. It is tested against a simulated
   one; a real one (a Google OnHub) has only been asked who it is.
+- A rendezvous on a real public server with the aggregator behind a real NAT.
 
 ## Not built yet
 
@@ -286,6 +380,9 @@ loopback sockets.
   traffic carried is IPv4, and IPv6 is switched off while bonded (see above).
 - Forward error correction for priority traffic (it is duplicated instead).
 - Several aggregators with automatic choice between them.
+- Hubs reaching an aggregator directly once a rendezvous has introduced them
+  (hole punching), more than one rendezvous, and TLS on the rendezvous: see
+  [docs/TOPOLOGY.md](docs/TOPOLOGY.md).
 - Leaving a mesh from the device: "Leave" in the apps forgets the mesh
   locally; remove the device on the aggregator with `bond kick <id>`.
 - Windows.
@@ -293,7 +390,7 @@ loopback sockets.
 ## Layout
 
 ```
-cmd/bondd        the daemon: server | hub | relay | service
+cmd/bondd        the daemon: server | hub | relay | rendezvous | service
 cmd/bond         the command-line client
 core/wire        the bond header and its authentication tag
 core/sched       per-path measurements and the placement decision
@@ -304,6 +401,7 @@ core/classify    priority rules and flow learning
 core/control     join codes and the aggregator's registry
 core/path        UDP and WebSocket transports, pinning sockets to interfaces
 core/relay       the relay forwarder
+core/rendezvous  meeting point for aggregators with no public address
 core/discovery   finding relays on the LAN
 core/gateway     firewall rules for the aggregator and for router mode
 core/portmap     asking the router in front of the aggregator to forward its port

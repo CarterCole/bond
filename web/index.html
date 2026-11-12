@@ -121,7 +121,8 @@ function pathCard(p, max, canEdit) {
   return h("div", { class: "card" },
     h("div", { class: "row" },
       h("span", { class: "dot" + (p.up ? " up" : ""), title: p.up ? "up" : "down" }),
-      h("div", { class: "grow" }, h("span", { class: "name" }, p.name), " ", h("span", { class: "sub" }, p.kind || "")),
+      h("div", { class: "grow" }, h("span", { class: "name" }, p.name), " ",
+        h("span", { class: "sub" }, (p.kind || "") + (p.via ? " · via " + p.via : ""))),
       sel),
     h("div", { class: "stats" },
       stat(rate(p.tx_bps), "sending"), stat(rate(p.rx_bps), "receiving"),
@@ -182,6 +183,7 @@ function renderServer(s) {
       tile(nodes.filter(n => n.online).length + " / " + nodes.length, "devices online"),
       tile(dur(s.uptime_sec), "uptime")),
     s.port_map ? h("p", { class: "sub" }, "Router: " + s.port_map.note) : null,
+    s.via ? h("p", { class: "sub" }, "Rendezvous: " + viaText(s.via)) : null,
     h("h2", {}, "Add a device"),
     h("div", { class: "card row" },
       h("img", { class: "qr", src: "/api/qr.svg", alt: "join code as a QR code" }),
@@ -204,6 +206,34 @@ function renderServer(s) {
   ];
 }
 
+function viaText(v) {
+  if (v.state !== "registered") return v.state + " to " + v.rendezvous + (v.error ? " (last attempt: " + v.error + ")" : "");
+  if (!v.link_up) return "registered with " + v.rendezvous + ", link not answering";
+  return "registered with " + v.rendezvous + ", link up" + (v.seen_as ? ", seen as " + v.seen_as : "");
+}
+
+function renderRendezvous(s) {
+  const r = s.rendezvous, aggs = r.aggregators || [];
+  $("sub").textContent = r.public;
+  return [
+    h("div", { class: "tiles" },
+      tile(String(aggs.length), "aggregators registered"), tile(bytes(r.up_bytes), "forwarded up"),
+      tile(bytes(r.down_bytes), "forwarded down"), tile(dur(s.uptime_sec), "uptime")),
+    h("h2", {}, "Register an aggregator"),
+    h("div", { class: "card" },
+      h("p", {}, "On a machine with no public address:"),
+      h("p", {}, h("code", {}, "bondd server --via " + s.pairing_code)),
+      h("p", { class: "sub" }, "Anyone with this code can register an aggregator here. Treat it like a password.")),
+    h("h2", {}, "Aggregators"),
+    aggs.length ? aggs.map(a => h("div", { class: "card row" },
+      h("span", { class: "dot" + (a.link ? " up" : "") }),
+      h("div", { class: "grow" }, h("span", { class: "name" }, "mesh " + a.mesh), " ",
+        h("span", { class: "sub" }, (a.link ? "link from " + a.link : "no link yet") + " · " + a.sessions + " devices · " +
+          a.sources + " sockets · " + bytes(a.up_bytes) + " up · " + bytes(a.down_bytes) + " down"))))
+      : h("div", { class: "card sub" }, "No aggregator has registered yet."),
+  ];
+}
+
 function renderRelay(s) {
   const r = s.relay;
   $("sub").textContent = s.name + " · sharing " + (s.uplink || "default uplink") + " · port " + r.port;
@@ -221,7 +251,7 @@ async function refresh() {
     state.className = "pill " + (ok ? "ok" : "bad");
     $("title").textContent = "Bond " + s.role;
     document.title = "Bond · " + (s.name || s.role);
-    const view = s.role === "hub" ? renderHub(s) : s.role === "aggregator" ? renderServer(s) : renderRelay(s);
+    const view = s.role === "hub" ? renderHub(s) : s.role === "aggregator" ? renderServer(s) : s.role === "rendezvous" ? renderRendezvous(s) : renderRelay(s);
     morph($("app"), h("div", { id: "app" }, view.flat().filter(Boolean)));
   } catch (e) {
     $("state").textContent = "daemon not reachable";
