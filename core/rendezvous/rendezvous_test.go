@@ -291,11 +291,31 @@ func TestUnconfirmedSourcesMakeWay(t *testing.T) {
 			return false
 		}
 	}
+	// confirmed reports whether the rendezvous has taken the aggregator's
+	// confirmation of conn's socket: it answers one with the socket's
+	// address. (The aggregator's own flag only says the confirmation left.)
+	confirmed := func(conn *net.UDPConn) func() bool {
+		return func() bool {
+			r.cli.mu.Lock()
+			defer r.cli.mu.Unlock()
+			if r.cli.cur == nil {
+				return false
+			}
+			r.cli.cur.mu.Lock()
+			defer r.cli.cur.mu.Unlock()
+			for _, h := range r.cli.cur.handles {
+				if a := h.addr.Load(); a != nil && *a == conn.LocalAddr().String() {
+					return true
+				}
+			}
+			return false
+		}
+	}
 	a, b, c, d := hub(), hub(), hub(), hub()
 	if !reaches(a, "good a") {
 		t.Fatal("a genuine hub socket was refused")
 	}
-	eventually(t, "a confirmed", func() bool { return r.cli.Status().Sources == 1 })
+	eventually(t, "a confirmed", confirmed(a))
 	if !reaches(b, "junk b") || !reaches(c, "junk c") {
 		t.Fatal("an unconfirmed newcomer was refused while an unconfirmed source could make way")
 	}
@@ -305,7 +325,7 @@ func TestUnconfirmedSourcesMakeWay(t *testing.T) {
 	if !reaches(c, "good c") {
 		t.Fatal("c lost its place")
 	}
-	eventually(t, "c confirmed", func() bool { return r.cli.Status().Sources == 2 })
+	eventually(t, "c confirmed", confirmed(c))
 	if reaches(d, "junk d") {
 		t.Fatal("a newcomer pushed out a confirmed source")
 	}
