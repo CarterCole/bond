@@ -1,0 +1,12 @@
+#!/bin/sh
+# After an upgrade, restart the services `bondd service install` set up, so
+# they run the new binary (their units already point at /usr/bin/bondd). A
+# first install has none to restart, and a stopped service stays stopped.
+set -e
+
+if [ "$1" = configure ] && [ -n "$2" ] && [ -d /run/systemd/system ]; then
+	for role in server hub relay; do
+		[ -e "/etc/systemd/system/bond-$role.service" ] || continue
+		systemctl try-restart "bond-$role.service" || true
+	done
+fi
