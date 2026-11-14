@@ -1,3 +1,5 @@
+![BOND](.github/banner.png)
+
 # Bond — bonded internet
 
 Bond combines several Internet connections into one. A venue's flaky WiFi, a
